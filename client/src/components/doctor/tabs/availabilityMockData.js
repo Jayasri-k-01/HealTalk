@@ -1,0 +1,97 @@
+// TEMP: replace with API call (e.g. GET /api/doctor/availability and PUT /api/doctor/availability)
+
+export const mockDoctorAvailability = {
+  weeklySchedule: [
+    {
+      day: "Monday",
+      enabled: true,
+      startTime: "09:00",
+      endTime: "17:00",
+      slotDuration: 30, // in minutes
+      maxPatients: 12,
+      breakStart: "13:00",
+      breakEnd: "14:00",
+    },
+    {
+      day: "Tuesday",
+      enabled: true,
+      startTime: "09:00",
+      endTime: "17:00",
+      slotDuration: 30,
+      maxPatients: 12,
+      breakStart: "13:00",
+      breakEnd: "14:00",
+    },
+    {
+      day: "Wednesday",
+      enabled: true,
+      startTime: "09:00",
+      endTime: "17:00",
+      slotDuration: 30,
+      maxPatients: 12,
+      breakStart: "13:00",
+      breakEnd: "14:00",
+    },
+    {
+      day: "Thursday",
+      enabled: true,
+      startTime: "09:00",
+      endTime: "17:00",
+      slotDuration: 30,
+      maxPatients: 12,
+      breakStart: "13:00",
+      breakEnd: "14:00",
+    },
+    {
+      day: "Friday",
+      enabled: true,
+      startTime: "09:00",
+      endTime: "15:00",
+      slotDuration: 30,
+      maxPatients: 8,
+      breakStart: "12:30",
+      breakEnd: "13:30",
+    },
+    {
+      day: "Saturday",
+      enabled: false,
+      startTime: "10:00",
+      endTime: "14:00",
+      slotDuration: 30,
+      maxPatients: 6,
+      breakStart: "",
+      breakEnd: "",
+    },
+    {
+      day: "Sunday",
+      enabled: false,
+      startTime: "10:00",
+      endTime: "14:00",
+      slotDuration: 30,
+      maxPatients: 4,
+      breakStart: "",
+      breakEnd: "",
+    },
+  ],
+  blockedDates: [
+    {
+      id: "BLK-001",
+      startDate: "2026-10-12",
+      endDate: "2026-10-14",
+      reason: "American Heart Association National Congress (Continuing Med Ed)",
+    },
+    {
+      id: "BLK-002",
+      startDate: "2026-11-26",
+      endDate: "2026-11-27",
+      reason: "Thanksgiving Holiday Clinic Closure",
+    },
+  ],
+  consultationTypesAccepted: {
+    videoConsultation: true,
+    chatConsultation: true,
+    emergencyTriage: false,
+  },
+  autoConfirmAppointments: true,
+  bufferBetweenSlots: 10, // 10 minutes between visits
+};
