@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import {
   fetchMyAppointments,
   cancelAppointment as cancelAppointmentApi,
+  requestAppointmentInterpreter,
 } from "../../services/appointmentService";
 import {
   Calendar,
@@ -19,7 +20,24 @@ import {
   Info,
   X,
   ShieldCheck,
+  Globe,
+  Loader2,
 } from "lucide-react";
+
+const POPULAR_LANGUAGES = [
+  "Spanish",
+  "French",
+  "Hindi",
+  "Tamil",
+  "Telugu",
+  "Mandarin",
+  "Arabic",
+  "Russian",
+  "Portuguese",
+  "German",
+  "Vietnamese",
+  "Korean",
+];
 
 function MyAppointments({ setActiveTab, onJoinConsultation }) {
   const [activeFilter, setActiveFilter] = useState("Upcoming");
@@ -30,6 +48,10 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
   const [actionMessage, setActionMessage] = useState("");
   const [cancellingId, setCancellingId] = useState(null);
   const [selectedAppointment, setSelectedAppointment] = useState(null);
+  const [interpreterModalApt, setInterpreterModalApt] = useState(null);
+  const [selectedLanguage, setSelectedLanguage] = useState("Spanish");
+  const [customLanguage, setCustomLanguage] = useState("");
+  const [requestingInterpreter, setRequestingInterpreter] = useState(false);
 
   useEffect(() => {
     loadAppointments();
@@ -63,11 +85,11 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
       await cancelAppointmentApi(id);
       setAppointmentsList((prev) =>
         prev.map((apt) =>
-          apt.id === id ? { ...apt, status: "Cancelled" } : apt
+          apt.id === id ? { ...apt, status: "Cancelled", interpreterStatus: "Cancelled" } : apt
         )
       );
       if (selectedAppointment && selectedAppointment.id === id) {
-        setSelectedAppointment((prev) => ({ ...prev, status: "Cancelled" }));
+        setSelectedAppointment((prev) => ({ ...prev, status: "Cancelled", interpreterStatus: "Cancelled" }));
       }
       setActionMessage("Appointment cancelled successfully.");
       setTimeout(() => setActionMessage(""), 3500);
@@ -75,6 +97,64 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
       setError(err.message || "Failed to cancel appointment");
     } finally {
       setCancellingId(null);
+    }
+  };
+
+  const handleOpenInterpreterModal = (apt) => {
+    setInterpreterModalApt(apt);
+    setSelectedLanguage(apt.interpreterLanguage || "Spanish");
+    setCustomLanguage("");
+    setError("");
+  };
+
+  const handleSubmitInterpreterRequest = async (e) => {
+    if (e) e.preventDefault();
+    if (!interpreterModalApt) return;
+
+    const langToRequest = (customLanguage.trim() || selectedLanguage || "").trim();
+    if (!langToRequest) {
+      setError("Please select or type a language for interpretation.");
+      return;
+    }
+
+    try {
+      setRequestingInterpreter(true);
+      setError("");
+      const res = await requestAppointmentInterpreter(interpreterModalApt.id, langToRequest);
+      const updatedApt = res.appointment;
+
+      setAppointmentsList((prev) =>
+        prev.map((apt) =>
+          apt.id === interpreterModalApt.id
+            ? {
+                ...apt,
+                interpreterRequested: true,
+                interpreterLanguage: langToRequest,
+                interpreterStatus: "Requested",
+                interpreter: null,
+              }
+            : apt
+        )
+      );
+
+      if (selectedAppointment && selectedAppointment.id === interpreterModalApt.id) {
+        setSelectedAppointment((prev) => ({
+          ...prev,
+          interpreterRequested: true,
+          interpreterLanguage: langToRequest,
+          interpreterStatus: "Requested",
+          interpreter: null,
+        }));
+      }
+
+      setActionMessage(`Live ${langToRequest} interpreter requested successfully!`);
+      setInterpreterModalApt(null);
+      setTimeout(() => setActionMessage(""), 4000);
+    } catch (err) {
+      console.error("Error submitting interpreter request:", err);
+      setError(err.message || "Failed to submit interpreter request");
+    } finally {
+      setRequestingInterpreter(false);
     }
   };
 
@@ -259,9 +339,23 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
                       <Video size={14} /> {apt.type || "Video Call"}
                     </span>
                     {apt.interpreterRequested && (
-                      <span className="apt-tag interpreter-tag">
-                        <Languages size={14} /> {apt.interpreterLanguage || "Interpreter"} Requested
-                      </span>
+                      apt.interpreterStatus === "Accepted" || (apt.interpreter && apt.interpreterStatus !== "Cancelled") ? (
+                        <span
+                          className="apt-tag"
+                          style={{
+                            background: "#ecfdf5",
+                            color: "#059669",
+                            border: "1px solid #a7f3d0",
+                            fontWeight: "600",
+                          }}
+                        >
+                          <ShieldCheck size={14} /> Interpreter Confirmed: {apt.interpreter?.name || "Assigned"} ({apt.interpreterLanguage})
+                        </span>
+                      ) : (
+                        <span className="apt-tag interpreter-tag">
+                          <Languages size={14} /> Interpreter Requested ({apt.interpreterLanguage})
+                        </span>
+                      )
                     )}
                   </div>
                 </div>
@@ -288,6 +382,32 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
                   <Info size={15} />
                   <span>Details</span>
                 </button>
+
+                {/* Request Interpreter Action Button */}
+                {apt.status !== "Cancelled" && apt.status !== "Completed" && (
+                  (!apt.interpreterRequested || (apt.interpreterStatus !== "Requested" && apt.interpreterStatus !== "Accepted")) ? (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenInterpreterModal(apt)}
+                      style={{
+                        padding: "8px 13px",
+                        borderRadius: "8px",
+                        border: "1.5px solid #c7d2fe",
+                        background: "#eef2ff",
+                        color: "#4f46e5",
+                        fontSize: "13px",
+                        fontWeight: "600",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      <Languages size={15} />
+                      <span>Request Interpreter</span>
+                    </button>
+                  ) : null
+                )}
 
                 {apt.status === "Pending" && (
                   <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
@@ -452,18 +572,83 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
 
                 <div style={{ background: "#fafcfc", border: "1px solid #d5eaec", padding: "12px", borderRadius: "10px" }}>
                   <span style={{ fontSize: "12px", color: "#6b878c", display: "block", marginBottom: "4px" }}>
-                    Live Interpreter
+                    Live Interpreter Status
                   </span>
                   <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "600", color: "#173b42" }}>
-                    <Languages size={16} style={{ color: selectedAppointment.interpreterRequested ? "#087f8c" : "#94a3b8" }} />
+                    <Languages size={16} style={{ color: selectedAppointment.interpreterRequested ? "#4f46e5" : "#94a3b8" }} />
                     <span>
                       {selectedAppointment.interpreterRequested
-                        ? `${selectedAppointment.interpreterLanguage || "Requested"}`
+                        ? selectedAppointment.interpreterStatus === "Accepted"
+                          ? `Assigned: ${selectedAppointment.interpreter?.name || "Interpreter"} (${selectedAppointment.interpreterLanguage})`
+                          : `Requested: ${selectedAppointment.interpreterLanguage}`
                         : "Not Requested"}
                     </span>
                   </div>
                 </div>
               </div>
+
+              {/* Interpreter Status Card in Modal */}
+              {selectedAppointment.interpreterRequested ? (
+                <div
+                  style={{
+                    background: selectedAppointment.interpreterStatus === "Accepted" ? "#f0fdf4" : "#eef2ff",
+                    border: selectedAppointment.interpreterStatus === "Accepted" ? "1px solid #bbf7d0" : "1px solid #c7d2fe",
+                    borderRadius: "12px",
+                    padding: "12px 14px",
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "10px",
+                  }}
+                >
+                  {selectedAppointment.interpreterStatus === "Accepted" ? (
+                    <ShieldCheck size={20} style={{ color: "#16a34a", marginTop: "2px", flexShrink: 0 }} />
+                  ) : (
+                    <Languages size={20} style={{ color: "#4f46e5", marginTop: "2px", flexShrink: 0 }} />
+                  )}
+                  <div>
+                    <div style={{ fontWeight: "700", fontSize: "13px", color: selectedAppointment.interpreterStatus === "Accepted" ? "#166534" : "#3730a3" }}>
+                      {selectedAppointment.interpreterStatus === "Accepted"
+                        ? `Certified Interpreter Assigned (${selectedAppointment.interpreterLanguage})`
+                        : `Interpreter Requested: ${selectedAppointment.interpreterLanguage}`}
+                    </div>
+                    <p style={{ margin: "3px 0 0 0", fontSize: "12px", color: selectedAppointment.interpreterStatus === "Accepted" ? "#15803d" : "#4338ca", lineHeight: "1.4" }}>
+                      {selectedAppointment.interpreterStatus === "Accepted"
+                        ? `${selectedAppointment.interpreter?.name || "Your assigned interpreter"} will join the consultation to provide live ${selectedAppointment.interpreterLanguage} translation.`
+                        : `Your request for a certified ${selectedAppointment.interpreterLanguage} interpreter is active and waiting for an available interpreter to accept.`}
+                    </p>
+                  </div>
+                </div>
+              ) : selectedAppointment.status !== "Cancelled" && selectedAppointment.status !== "Completed" ? (
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", padding: "12px 14px", borderRadius: "10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontSize: "13px", color: "#475569" }}>
+                    <span>Need live language translation for this session?</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const apt = selectedAppointment;
+                      setSelectedAppointment(null);
+                      handleOpenInterpreterModal(apt);
+                    }}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "6px",
+                      border: "none",
+                      background: "#4f46e5",
+                      color: "#ffffff",
+                      fontSize: "12px",
+                      fontWeight: "600",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                    }}
+                  >
+                    <Languages size={14} />
+                    <span>Request Now</span>
+                  </button>
+                </div>
+              ) : null}
 
               {/* Reason / Symptoms */}
               <div style={{ background: "#fafcfc", border: "1px solid #d5eaec", padding: "14px", borderRadius: "10px" }}>
@@ -540,6 +725,185 @@ function MyAppointments({ setActiveTab, onJoinConsultation }) {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dedicated Request Interpreter Modal */}
+      {interpreterModalApt && (
+        <div className="modal-overlay" style={{ zIndex: 1100 }}>
+          <div className="booking-modal-card" style={{ maxWidth: "520px", borderRadius: "16px" }}>
+            <div className="modal-header">
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div
+                  style={{
+                    width: "42px",
+                    height: "42px",
+                    borderRadius: "10px",
+                    background: "#eef2ff",
+                    color: "#4f46e5",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Languages size={24} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: "18px", color: "#0f172a" }}>Request Medical Interpreter</h3>
+                  <span style={{ fontSize: "13px", color: "#64748b" }}>Live language translation for your consultation</span>
+                </div>
+              </div>
+              <button
+                className="close-modal-btn"
+                onClick={() => {
+                  setInterpreterModalApt(null);
+                  setError("");
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitInterpreterRequest} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              {/* Appointment Information Card */}
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "12px", padding: "14px" }}>
+                <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.5px", color: "#64748b", marginBottom: "8px" }}>
+                  Appointment Information
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", fontSize: "13px" }}>
+                  <div>
+                    <span style={{ color: "#64748b", display: "block", fontSize: "11px" }}>Doctor</span>
+                    <strong style={{ color: "#0f172a" }}>{interpreterModalApt.doctorName}</strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "#64748b", display: "block", fontSize: "11px" }}>Specialty</span>
+                    <strong style={{ color: "#0f172a" }}>{interpreterModalApt.specialty}</strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "#64748b", display: "block", fontSize: "11px" }}>Date & Time</span>
+                    <strong style={{ color: "#0f172a" }}>{interpreterModalApt.date} &bull; {interpreterModalApt.time}</strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "#64748b", display: "block", fontSize: "11px" }}>Appointment ID</span>
+                    <strong style={{ color: "#4f46e5" }}>{interpreterModalApt.id}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* Language Selection */}
+              <div>
+                <label style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#1e293b", marginBottom: "8px" }}>
+                  Select Required Language
+                </label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
+                  {POPULAR_LANGUAGES.map((lang) => (
+                    <button
+                      key={lang}
+                      type="button"
+                      onClick={() => {
+                        setSelectedLanguage(lang);
+                        setCustomLanguage("");
+                      }}
+                      style={{
+                        padding: "7px 14px",
+                        borderRadius: "20px",
+                        border: selectedLanguage === lang && !customLanguage ? "2px solid #4f46e5" : "1px solid #cbd5e1",
+                        background: selectedLanguage === lang && !customLanguage ? "#eef2ff" : "#ffffff",
+                        color: selectedLanguage === lang && !customLanguage ? "#4f46e5" : "#334155",
+                        fontWeight: selectedLanguage === lang && !customLanguage ? "600" : "500",
+                        fontSize: "13px",
+                        cursor: "pointer",
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      {lang}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="text"
+                    placeholder="Or type another language (e.g. Cantonese, Bengali, Polish)..."
+                    value={customLanguage}
+                    onChange={(e) => {
+                      setCustomLanguage(e.target.value);
+                      if (e.target.value) setSelectedLanguage("");
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: "10px 14px",
+                      borderRadius: "10px",
+                      border: "1.5px solid #cbd5e1",
+                      fontSize: "13px",
+                      color: "#0f172a",
+                      outline: "none",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: "10px", padding: "12px", display: "flex", gap: "10px", alignItems: "flex-start" }}>
+                <Globe size={18} style={{ color: "#2563eb", flexShrink: 0, marginTop: "2px" }} />
+                <p style={{ margin: 0, fontSize: "12.5px", color: "#1e40af", lineHeight: "1.4" }}>
+                  An authenticated interpreter certified in <strong>{customLanguage.trim() || selectedLanguage}</strong> will receive your request and be assigned to your appointment.
+                </p>
+              </div>
+
+              {error && (
+                <div className="auth-alert alert-error" style={{ margin: 0 }}>
+                  <AlertCircle size={16} />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <div className="modal-actions" style={{ display: "flex", gap: "10px", marginTop: "6px" }}>
+                <button
+                  type="button"
+                  className="cancel-btn"
+                  onClick={() => {
+                    setInterpreterModalApt(null);
+                    setError("");
+                  }}
+                  style={{ flex: "1" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={requestingInterpreter}
+                  style={{
+                    flex: "2",
+                    padding: "11px 18px",
+                    borderRadius: "10px",
+                    border: "none",
+                    background: "#4f46e5",
+                    color: "#ffffff",
+                    fontWeight: "600",
+                    fontSize: "14px",
+                    cursor: requestingInterpreter ? "not-allowed" : "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                  }}
+                >
+                  {requestingInterpreter ? (
+                    <>
+                      <Loader2 size={16} className="spinner" />
+                      <span>Submitting Request...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Languages size={16} />
+                      <span>Submit Interpreter Request</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

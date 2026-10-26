@@ -38,6 +38,11 @@ const userSchema = new mongoose.Schema(
       default: "English",
     },
 
+    languages: {
+      type: [String],
+      default: [],
+    },
+
     phone: {
       type: String,
       default: "",
@@ -66,6 +71,86 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: "",
       trim: true,
+    },
+
+    certificationNumber: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    bio: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    profilePhoto: {
+      type: String,
+      default: "",
+    },
+
+    avatar: {
+      type: String,
+      default: "",
+    },
+
+    dateOfBirth: {
+      type: String,
+      default: "",
+    },
+
+    interpreterId: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    certificationDocument: {
+      fileName: { type: String, default: "" },
+      originalName: { type: String, default: "" },
+      fileUrl: { type: String, default: "" },
+      fileType: { type: String, default: "" },
+      fileSize: { type: Number, default: 0 },
+      uploadedAt: { type: Date, default: null },
+    },
+
+    languageProficiencies: {
+      type: [
+        {
+          language: { type: String, required: true },
+          proficiency: {
+            type: String,
+            enum: ["Basic", "Intermediate", "Advanced", "Native"],
+            default: "Advanced",
+          },
+          sourceLanguage: { type: String, default: "English" },
+          targetLanguage: { type: String, default: "" },
+          bidirectional: { type: Boolean, default: true },
+        },
+      ],
+      default: [],
+    },
+
+    availabilityStatus: {
+      type: String,
+      enum: ["Available", "Busy", "Offline"],
+      default: "Available",
+    },
+
+    workingDays: {
+      type: [String],
+      default: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    },
+
+    availableTimeSlots: {
+      type: [String],
+      default: ["09:00 AM - 01:00 PM", "02:00 PM - 06:00 PM"],
+    },
+
+    timeZone: {
+      type: String,
+      default: "UTC",
     },
 
     hospital: {

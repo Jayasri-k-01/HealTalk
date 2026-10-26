@@ -105,6 +105,7 @@ const getPatientAppointments = async (req, res) => {
     const appointments = await Appointment.find(query)
       .populate("patient", "name email phone language age gender")
       .populate("doctor", "name specialty fee rating languages")
+      .populate("interpreter", "name email phone language languages qualification experience specialization")
       .sort({ createdAt: -1 });
 
     res.json({
@@ -159,6 +160,9 @@ const cancelAppointment = async (req, res) => {
     }
 
     appointment.status = "Cancelled";
+    if (appointment.interpreterStatus === "Requested" || appointment.interpreterStatus === "Accepted") {
+      appointment.interpreterStatus = "Cancelled";
+    }
     await appointment.save();
 
     res.json({
@@ -196,6 +200,7 @@ const getDoctorAppointments = async (req, res) => {
     const appointments = await Appointment.find(query)
       .populate("patient", "name email phone language age gender bloodGroup allergies chronicConditions currentMedications vitals")
       .populate("doctor", "name specialty fee rating languages")
+      .populate("interpreter", "name email phone language languages qualification experience specialization")
       .sort({ createdAt: -1 });
 
     res.json({
@@ -217,12 +222,14 @@ const getAppointmentById = async (req, res) => {
   try {
     const isDoctor = req.user.role === "doctor";
     const isAdmin = req.user.role === "admin";
+    const isInterpreter = req.user.role === "interpreter";
     let appointment;
 
     if (isAdmin) {
       appointment = await Appointment.findById(req.params.id)
         .populate("patient", "name email phone language age gender bloodGroup allergies chronicConditions currentMedications vitals")
-        .populate("doctor", "name specialty fee rating languages");
+        .populate("doctor", "name specialty fee rating languages")
+        .populate("interpreter", "name email phone language languages qualification experience specialization");
     } else if (isDoctor) {
       const userDoc = await User.findById(req.user.id);
       const doctorDocs = await Doctor.find({
@@ -240,14 +247,27 @@ const getAppointmentById = async (req, res) => {
         ],
       })
         .populate("patient", "name email phone language age gender bloodGroup allergies chronicConditions currentMedications vitals")
-        .populate("doctor", "name specialty fee rating languages");
+        .populate("doctor", "name specialty fee rating languages")
+        .populate("interpreter", "name email phone language languages qualification experience specialization");
+    } else if (isInterpreter) {
+      appointment = await Appointment.findOne({
+        _id: req.params.id,
+        $or: [
+          { interpreter: req.user.id },
+          { interpreterRequested: true, interpreterStatus: "Requested" },
+        ],
+      })
+        .populate("patient", "name email phone language age gender bloodGroup allergies chronicConditions currentMedications vitals")
+        .populate("doctor", "name specialty fee rating languages")
+        .populate("interpreter", "name email phone language languages qualification experience specialization");
     } else {
       appointment = await Appointment.findOne({
         _id: req.params.id,
         patient: req.user.id,
       })
         .populate("patient", "name email phone language age gender bloodGroup allergies chronicConditions currentMedications vitals")
-        .populate("doctor", "name specialty fee rating languages");
+        .populate("doctor", "name specialty fee rating languages")
+        .populate("interpreter", "name email phone language languages qualification experience specialization");
     }
 
     if (!appointment) {
@@ -313,6 +333,9 @@ const completeAppointment = async (req, res) => {
     }
 
     appointment.status = "Completed";
+    if (appointment.interpreterStatus === "Accepted" || appointment.interpreterStatus === "Active") {
+      appointment.interpreterStatus = "Completed";
+    }
     if (req.body && req.body.notes) {
       appointment.notes = req.body.notes;
     }
@@ -339,6 +362,10 @@ const requestInterpreterForAppointment = async (req, res) => {
     const isDoctor = req.user.role === "doctor";
     const isAdmin = req.user.role === "admin";
     let appointment;
+
+    if (!language || !language.trim()) {
+      return res.status(400).json({ message: "Please select a required interpreter language" });
+    }
 
     if (isAdmin) {
       appointment = await Appointment.findById(req.params.id);
@@ -369,21 +396,254 @@ const requestInterpreterForAppointment = async (req, res) => {
       return res.status(404).json({ message: "Appointment not found or not authorized" });
     }
 
-    appointment.interpreterRequested = true;
-    if (language) {
-      appointment.interpreterLanguage = language;
+    if (appointment.status === "Cancelled" || appointment.status === "Completed") {
+      return res.status(400).json({
+        message: `Cannot request interpreter for a ${appointment.status.toLowerCase()} appointment.`,
+      });
     }
+
+    // Check duplicate request
+    if (
+      appointment.interpreterRequested &&
+      (appointment.interpreterStatus === "Requested" || appointment.interpreterStatus === "Accepted") &&
+      appointment.interpreterLanguage?.toLowerCase() === language.trim().toLowerCase()
+    ) {
+      return res.status(400).json({
+        message: `An interpreter request for ${appointment.interpreterLanguage} is already active for this appointment.`,
+      });
+    }
+
+    appointment.interpreterRequested = true;
+    appointment.interpreterLanguage = language.trim();
+    appointment.interpreterStatus = "Requested";
+    appointment.interpreter = null;
+    appointment.interpreterAssignedAt = null;
     await appointment.save();
+
+    const populatedAppointment = await Appointment.findById(appointment._id)
+      .populate("patient", "name email phone language age gender")
+      .populate("doctor", "name specialty fee rating languages")
+      .populate("interpreter", "name email phone language languages qualification experience specialization");
 
     res.json({
       success: true,
-      message: "Interpreter requested for appointment",
-      appointment,
+      message: `Interpreter requested for ${language.trim()}`,
+      appointment: populatedAppointment,
     });
   } catch (error) {
     console.error("Error requesting interpreter:", error);
     res.status(500).json({
       message: "Failed to request interpreter",
+      error: error.message,
+    });
+  }
+};
+
+// GET /api/appointments/interpreter/requests - List available requests matching interpreter's supported languages
+const getAvailableInterpreterRequests = async (req, res) => {
+  try {
+    const userDoc = await User.findById(req.user.id);
+    if (!userDoc || userDoc.role !== "interpreter") {
+      return res.status(403).json({ message: "Access restricted to authenticated interpreters" });
+    }
+
+    // Extract interpreter's supported languages
+    const supportedLanguages = new Set();
+    if (userDoc.language) {
+      userDoc.language.split(",").forEach((l) => supportedLanguages.add(l.trim().toLowerCase()));
+    }
+    if (Array.isArray(userDoc.languages)) {
+      userDoc.languages.forEach((l) => supportedLanguages.add(l.trim().toLowerCase()));
+    }
+
+    // Availability check: if interpreter is Busy or Offline, they are not eligible for new matching requests
+    const availabilityStatus = userDoc.availabilityStatus || "Available";
+    if (availabilityStatus !== "Available") {
+      return res.json({
+        success: true,
+        count: 0,
+        requests: [],
+        availabilityStatus,
+        supportedLanguages: Array.from(supportedLanguages),
+        message: `New matching requests are paused because your status is currently set to ${availabilityStatus}. Switch to Available in My Profile to receive requests.`,
+      });
+    }
+
+    // Find all pending interpreter requests
+    const query = {
+      interpreterRequested: true,
+      interpreterStatus: "Requested",
+      status: { $in: ["Confirmed", "Pending", "In Progress"] },
+      interpreter: null,
+    };
+
+    const allRequests = await Appointment.find(query)
+      .populate("patient", "name email phone language age gender")
+      .populate("doctor", "name specialty fee rating languages hospital")
+      .sort({ createdAt: -1 });
+
+    // Filter by matching language
+    const matchingRequests = allRequests.filter((apt) => {
+      if (!apt.interpreterLanguage) return false;
+      const targetLang = apt.interpreterLanguage.toLowerCase().trim();
+      return supportedLanguages.has(targetLang) || Array.from(supportedLanguages).some(sl => sl.includes(targetLang) || targetLang.includes(sl));
+    });
+
+    res.json({
+      success: true,
+      count: matchingRequests.length,
+      requests: matchingRequests,
+      supportedLanguages: Array.from(supportedLanguages),
+    });
+  } catch (error) {
+    console.error("Error fetching available interpreter requests:", error);
+    res.status(500).json({
+      message: "Failed to fetch interpreter requests",
+      error: error.message,
+    });
+  }
+};
+
+// GET /api/appointments/interpreter/my - List appointments assigned to the logged-in interpreter
+const getMyInterpreterAssignments = async (req, res) => {
+  try {
+    const userDoc = await User.findById(req.user.id);
+    if (!userDoc || userDoc.role !== "interpreter") {
+      return res.status(403).json({ message: "Access restricted to authenticated interpreters" });
+    }
+
+    const assignments = await Appointment.find({
+      interpreter: req.user.id,
+    })
+      .populate("patient", "name email phone language age gender bloodGroup allergies chronicConditions")
+      .populate("doctor", "name specialty fee rating languages hospital")
+      .populate("interpreter", "name email phone language languages qualification experience specialization")
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      count: assignments.length,
+      appointments: assignments,
+    });
+  } catch (error) {
+    console.error("Error fetching interpreter assignments:", error);
+    res.status(500).json({
+      message: "Failed to fetch your interpreter assignments",
+      error: error.message,
+    });
+  }
+};
+
+// PUT /api/appointments/:id/interpreter/accept - Accept an interpreter request
+const acceptInterpreterRequest = async (req, res) => {
+  try {
+    const userDoc = await User.findById(req.user.id);
+    if (!userDoc || userDoc.role !== "interpreter") {
+      return res.status(403).json({ message: "Only certified interpreters can accept interpreter requests" });
+    }
+
+    if (userDoc.status !== "approved") {
+      return res.status(403).json({ message: "Your interpreter account is pending approval or inactive." });
+    }
+
+    const appointment = await Appointment.findById(req.params.id);
+    if (!appointment) {
+      return res.status(404).json({ message: "Appointment not found" });
+    }
+
+    if (appointment.status === "Cancelled" || appointment.status === "Completed") {
+      return res.status(400).json({
+        message: `Cannot accept request for a ${appointment.status.toLowerCase()} appointment.`,
+      });
+    }
+
+    if (!appointment.interpreterRequested) {
+      return res.status(400).json({ message: "No interpreter was requested for this appointment." });
+    }
+
+    if (appointment.interpreterStatus === "Accepted" && appointment.interpreter) {
+      if (appointment.interpreter.toString() === req.user.id) {
+        return res.json({
+          success: true,
+          message: "You have already accepted this request.",
+          appointment,
+        });
+      }
+      return res.status(400).json({ message: "This interpreter request has already been accepted by another interpreter." });
+    }
+
+    // Verify language eligibility
+    const supportedLanguages = new Set();
+    if (userDoc.language) {
+      userDoc.language.split(",").forEach((l) => supportedLanguages.add(l.trim().toLowerCase()));
+    }
+    if (Array.isArray(userDoc.languages)) {
+      userDoc.languages.forEach((l) => supportedLanguages.add(l.trim().toLowerCase()));
+    }
+
+    const targetLang = (appointment.interpreterLanguage || "").toLowerCase().trim();
+    const isEligible = supportedLanguages.has(targetLang) || Array.from(supportedLanguages).some(sl => sl.includes(targetLang) || targetLang.includes(sl));
+
+    if (!isEligible) {
+      return res.status(403).json({
+        message: `You are not registered for the requested language (${appointment.interpreterLanguage}). Your registered languages: ${Array.from(supportedLanguages).join(", ")}`,
+      });
+    }
+
+    appointment.interpreter = req.user.id;
+    appointment.interpreterStatus = "Accepted";
+    appointment.interpreterAssignedAt = new Date();
+    await appointment.save();
+
+    const populatedAppointment = await Appointment.findById(appointment._id)
+      .populate("patient", "name email phone language age gender")
+      .populate("doctor", "name specialty fee rating languages")
+      .populate("interpreter", "name email phone language languages qualification experience specialization");
+
+    res.json({
+      success: true,
+      message: `Interpreter request accepted! You are now assigned to provide ${appointment.interpreterLanguage} translation.`,
+      appointment: populatedAppointment,
+    });
+  } catch (error) {
+    console.error("Error accepting interpreter request:", error);
+    res.status(500).json({
+      message: "Failed to accept interpreter request",
+      error: error.message,
+    });
+  }
+};
+
+// PUT /api/appointments/:id/interpreter/reject - Decline or release an interpreter request
+const rejectInterpreterRequest = async (req, res) => {
+  try {
+    const userDoc = await User.findById(req.user.id);
+    if (!userDoc || userDoc.role !== "interpreter") {
+      return res.status(403).json({ message: "Only interpreters can decline or release assignments" });
+    }
+
+    const appointment = await Appointment.findById(req.params.id);
+    if (!appointment) {
+      return res.status(404).json({ message: "Appointment not found" });
+    }
+
+    // If this interpreter was assigned, release the assignment back to 'Requested' so another interpreter can accept
+    if (appointment.interpreter && appointment.interpreter.toString() === req.user.id) {
+      appointment.interpreter = null;
+      appointment.interpreterStatus = "Requested";
+      appointment.interpreterAssignedAt = null;
+      await appointment.save();
+    }
+
+    res.json({
+      success: true,
+      message: "Interpreter assignment released. The request is now available for other interpreters.",
+      appointment,
+    });
+  } catch (error) {
+    console.error("Error rejecting interpreter request:", error);
+    res.status(500).json({
+      message: "Failed to decline interpreter request",
       error: error.message,
     });
   }
@@ -448,4 +708,8 @@ module.exports = {
   completeAppointment,
   confirmAppointment,
   requestInterpreterForAppointment,
+  getAvailableInterpreterRequests,
+  getMyInterpreterAssignments,
+  acceptInterpreterRequest,
+  rejectInterpreterRequest,
 };

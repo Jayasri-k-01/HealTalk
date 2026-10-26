@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Uploads
+uploads/*
+!.gitkeep
+
+# Logs
+logs/
+*.log
+npm-debug.log*

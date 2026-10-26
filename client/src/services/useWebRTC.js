@@ -22,73 +22,109 @@ export function useWebRTC({
   const [permissionDenied, setPermissionDenied] = useState(false);
 
   const [localStream, setLocalStream] = useState(null);
-  const [remoteStream, setRemoteStream] = useState(null);
   const [isMicOn, setIsMicOn] = useState(true);
   const [isCameraOn, setIsCameraOn] = useState(true);
 
-  const [peerInfo, setPeerInfo] = useState(null);
-  const [remoteMediaState, setRemoteMediaState] = useState({
-    isVideoEnabled: true,
-    isAudioEnabled: true,
-  });
-
+  // Multi-peer remote participants array:
+  // [{ socketId, peerInfo, stream, role, userName, isVideoEnabled, isAudioEnabled, hasVideoTrack, hasAudioTrack, lastUpdated }]
+  const [remotePeers, setRemotePeers] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const socketRef = useRef(null);
-  const peerConnectionRef = useRef(null);
-  const iceCandidatesQueue = useRef([]);
   const localStreamRef = useRef(null);
-  const targetSocketIdRef = useRef(null);
+
+  // Multi-peer maps
+  const peerConnectionsRef = useRef(new Map()); // socketId -> RTCPeerConnection
+  const iceQueuesRef = useRef(new Map()); // socketId -> candidate[]
+  const peerInfoMapRef = useRef(new Map()); // socketId -> peerInfo
+  const remoteStreamsRef = useRef(new Map()); // socketId -> MediaStream
+
+  // Normalize appointmentId to string
+  const normalizedAppointmentId = appointmentId ? String(appointmentId) : "";
 
   // Helper to safely bind local video stream to DOM video element
   const bindLocalVideo = useCallback(() => {
     if (localVideoRef.current && localStreamRef.current) {
-      localVideoRef.current.srcObject = localStreamRef.current;
-      localVideoRef.current.muted = true; // Avoid feedback
+      if (localVideoRef.current.srcObject !== localStreamRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+      localVideoRef.current.muted = true; // Avoid acoustic feedback
+      localVideoRef.current.playsInline = true;
       localVideoRef.current.play().catch((err) => {
-        console.warn("Autoplay local video blocked or error:", err);
+        console.warn("[WebRTC] Autoplay local video blocked or error:", err);
       });
     }
   }, []);
 
-  // Helper to safely bind remote video stream to DOM video element
+  // Helper to safely bind primary remote video stream to DOM video element (1-on-1 backward compatibility)
   const bindRemoteVideo = useCallback((stream) => {
     if (remoteVideoRef.current && stream) {
-      remoteVideoRef.current.srcObject = stream;
+      if (remoteVideoRef.current.srcObject !== stream) {
+        remoteVideoRef.current.srcObject = stream;
+      }
+      remoteVideoRef.current.playsInline = true;
       remoteVideoRef.current.play().catch((err) => {
-        console.warn("Autoplay remote video blocked or error:", err);
+        console.warn("[WebRTC] Autoplay primary remote video error:", err);
+        if (err.name === "NotAllowedError") {
+          // Attempt muted autoplay fallback on strict mobile browsers
+          remoteVideoRef.current.muted = true;
+          remoteVideoRef.current.play().catch((e) => console.warn("[WebRTC] Muted fallback also blocked:", e));
+        }
       });
     }
   }, []);
 
-  // Create WebRTC Peer Connection
-  const createPeerConnection = useCallback((targetSocketId) => {
-    if (peerConnectionRef.current) {
-      try {
-        peerConnectionRef.current.close();
-      } catch (e) {
-        console.warn("Error closing previous pc:", e);
+  // Get or create RTCPeerConnection for a specific peer
+  const getOrCreatePeerConnection = useCallback((targetSocketId, targetPeerInfo) => {
+    if (targetPeerInfo) {
+      peerInfoMapRef.current.set(targetSocketId, targetPeerInfo);
+    }
+
+    if (peerConnectionsRef.current.has(targetSocketId)) {
+      const existingPc = peerConnectionsRef.current.get(targetSocketId);
+      if (existingPc && existingPc.signalingState !== "closed") {
+        // Ensure all local media tracks are attached to this peer connection
+        if (localStreamRef.current) {
+          const senders = existingPc.getSenders();
+          localStreamRef.current.getTracks().forEach((track) => {
+            const hasSender = senders.some((s) => s.track && s.track.id === track.id);
+            if (!hasSender) {
+              try {
+                existingPc.addTrack(track, localStreamRef.current);
+                console.log(`[WebRTC] Added missing local track (${track.kind}) to existing pc for ${targetSocketId}`);
+              } catch (e) {
+                console.warn(`[WebRTC] Error adding track to existing pc for ${targetSocketId}:`, e);
+              }
+            }
+          });
+        }
+        return existingPc;
       }
     }
 
+    console.log(`[WebRTC] Creating new RTCPeerConnection for ${targetSocketId} (${targetPeerInfo?.role || "peer"}, ${targetPeerInfo?.userName || "Participant"})`);
     const pc = new RTCPeerConnection(ICE_SERVERS);
-    peerConnectionRef.current = pc;
-    targetSocketIdRef.current = targetSocketId;
+    peerConnectionsRef.current.set(targetSocketId, pc);
 
     // Add local media tracks to peer connection
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, localStreamRef.current);
+        try {
+          pc.addTrack(track, localStreamRef.current);
+          console.log(`[WebRTC] Added local track (${track.kind}) to pc for ${targetSocketId}`);
+        } catch (e) {
+          console.warn(`[WebRTC] Error adding track to pc for ${targetSocketId}:`, e);
+        }
       });
     }
 
     // ICE Candidate event
     pc.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current && targetSocketIdRef.current) {
+      if (event.candidate && socketRef.current) {
         socketRef.current.emit("signal-ice-candidate", {
-          targetSocketId: targetSocketIdRef.current,
+          targetSocketId,
           candidate: event.candidate,
         });
       }
@@ -96,47 +132,92 @@ export function useWebRTC({
 
     // Remote Track received
     pc.ontrack = (event) => {
-      if (event.streams && event.streams[0]) {
-        const stream = event.streams[0];
-        setRemoteStream(stream);
-        bindRemoteVideo(stream);
-        setConnectionStatus("CONNECTED");
-        setStatusMessage("Video consultation connected (Encrypted)");
+      console.log(`[WebRTC] pc.ontrack received from ${targetSocketId} (${targetPeerInfo?.role || "peer"}), track: ${event.track?.kind}`);
+
+      let stream = (event.streams && event.streams[0]) || null;
+      if (!stream) {
+        let existingStream = remoteStreamsRef.current.get(targetSocketId);
+        if (!existingStream) {
+          existingStream = new MediaStream();
+          remoteStreamsRef.current.set(targetSocketId, existingStream);
+        }
+        if (event.track) {
+          // Check if track already in existingStream
+          if (!existingStream.getTracks().some((t) => t.id === event.track.id)) {
+            existingStream.addTrack(event.track);
+          }
+        }
+        stream = existingStream;
+      } else {
+        remoteStreamsRef.current.set(targetSocketId, stream);
       }
+
+      const peerInfo = peerInfoMapRef.current.get(targetSocketId) || targetPeerInfo;
+      const targetRole = peerInfo?.role || targetPeerInfo?.role;
+      const targetName = peerInfo?.userName || targetPeerInfo?.userName;
+
+      // Create a fresh MediaStream snapshot with all current tracks so React detects state updates
+      const streamSnapshot = new MediaStream(stream.getTracks());
+
+      setRemotePeers((prev) => {
+        // Deduplicate by socketId or role for single-seat roles (doctor, patient, interpreter)
+        const index = prev.findIndex(
+          (p) => p.socketId === targetSocketId || (targetRole && p.role === targetRole)
+        );
+
+        const updatedPeer = {
+          socketId: targetSocketId,
+          peerInfo: peerInfo || (index >= 0 ? prev[index].peerInfo : null),
+          stream: streamSnapshot,
+          role: targetRole || (index >= 0 ? prev[index].role : "participant"),
+          userName: targetName || (index >= 0 ? prev[index].userName : "Participant"),
+          isVideoEnabled: peerInfo?.isVideoEnabled !== false,
+          isAudioEnabled: peerInfo?.isAudioEnabled !== false,
+          hasVideoTrack: streamSnapshot.getVideoTracks().length > 0,
+          hasAudioTrack: streamSnapshot.getAudioTracks().length > 0,
+          lastUpdated: Date.now(),
+        };
+
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = updatedPeer;
+          return next;
+        }
+        return [...prev, updatedPeer];
+      });
+
+      // Maintain primary remote stream binding
+      bindRemoteVideo(streamSnapshot);
+      setConnectionStatus("CONNECTED");
+      setStatusMessage("Video consultation connected (Encrypted)");
     };
 
     // Connection state change
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      console.log(`[WebRTC] Connection state changed: ${state}`);
+      console.log(`[WebRTC] Connection state with ${targetSocketId} (${targetPeerInfo?.role || "peer"}): ${state}`);
       if (state === "connected") {
         setConnectionStatus("CONNECTED");
         setStatusMessage("Video consultation connected (Encrypted)");
       } else if (state === "disconnected") {
-        setConnectionStatus("DISCONNECTED");
-        setStatusMessage("Peer disconnected. Waiting for reconnection...");
+        console.log(`[WebRTC] Peer ${targetSocketId} temporarily disconnected`);
       } else if (state === "failed") {
-        setConnectionStatus("ERROR");
-        setStatusMessage("WebRTC connection failed. Reconnecting...");
-        // Attempt ICE restart or reconnection
-        tryRestartPeer(targetSocketIdRef.current);
-      } else if (state === "closed") {
-        setConnectionStatus("ENDED");
+        console.warn(`[WebRTC] Connection failed with ${targetSocketId}. Attempting ICE restart...`);
+        if (typeof pc.restartIce === "function") {
+          try {
+            pc.restartIce();
+          } catch (e) {
+            console.warn("[WebRTC] restartIce error:", e);
+          }
+        }
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
-      console.log(`[WebRTC] ICE connection state: ${state}`);
+      console.log(`[WebRTC] ICE state with ${targetSocketId}: ${state}`);
       if (state === "connected" || state === "completed") {
         setConnectionStatus("CONNECTED");
-        setStatusMessage("Video consultation connected (Encrypted)");
-      } else if (state === "disconnected") {
-        setConnectionStatus("DISCONNECTED");
-        setStatusMessage("Temporary network fluctuation detected...");
-      } else if (state === "failed") {
-        setConnectionStatus("ERROR");
-        setStatusMessage("Network connection interrupted. Retrying...");
       }
     };
 
@@ -144,17 +225,30 @@ export function useWebRTC({
   }, [bindRemoteVideo]);
 
   // Initiate call to a target peer (Caller)
-  const initiateOffer = useCallback(async (targetSocketId) => {
+  const initiateOffer = useCallback(async (targetSocketId, targetPeerInfo) => {
     try {
+      console.log(`[WebRTC] initiateOffer -> target ${targetSocketId} (${targetPeerInfo?.role}, ${targetPeerInfo?.userName})`);
+      const pc = getOrCreatePeerConnection(targetSocketId, targetPeerInfo);
+
+      // Only initiate offer if connection is stable and not in another negotiation
+      if (pc.signalingState !== "stable") {
+        console.log(`[WebRTC] Skipping initiateOffer because pc with ${targetSocketId} is in state ${pc.signalingState}`);
+        return;
+      }
+
       setConnectionStatus("CONNECTING");
-      setStatusMessage("Initiating encrypted WebRTC handshake...");
-      const pc = createPeerConnection(targetSocketId);
+      setStatusMessage(`Initiating encrypted connection to ${targetPeerInfo?.userName || "peer"}...`);
 
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
 
+      if (pc.signalingState !== "stable") {
+        console.warn(`[WebRTC] Aborting setLocalDescription: state changed to ${pc.signalingState}`);
+        return;
+      }
+
       await pc.setLocalDescription(offer);
 
       if (socketRef.current) {
@@ -164,28 +258,12 @@ export function useWebRTC({
         });
       }
     } catch (err) {
-      console.error("Error creating WebRTC offer:", err);
-      setErrorMessage("Failed to initiate video stream: " + err.message);
-    }
-  }, [createPeerConnection]);
-
-  // Restart peer connection if dropped
-  const tryRestartPeer = useCallback(async (targetSocketId) => {
-    if (!targetSocketId || !localStreamRef.current) return;
-    try {
-      const pc = createPeerConnection(targetSocketId);
-      const offer = await pc.createOffer({ iceRestart: true });
-      await pc.setLocalDescription(offer);
-      if (socketRef.current) {
-        socketRef.current.emit("signal-offer", {
-          targetSocketId,
-          offer,
-        });
+      console.error(`[WebRTC] Error creating WebRTC offer for ${targetSocketId}:`, err);
+      if (!err.message?.includes("wrong state")) {
+        setErrorMessage("Failed to initiate video stream: " + err.message);
       }
-    } catch (err) {
-      console.warn("ICE restart failed:", err);
     }
-  }, [createPeerConnection]);
+  }, [getOrCreatePeerConnection]);
 
   // Setup Local Media (Camera & Mic)
   const setupLocalMedia = useCallback(async () => {
@@ -193,13 +271,23 @@ export function useWebRTC({
     setErrorMessage("");
 
     try {
-      // First try requesting video and audio
-      let stream;
+      if (!navigator?.mediaDevices?.getUserMedia) {
+        console.warn("[WebRTC] navigator.mediaDevices.getUserMedia is unavailable on this browser or origin");
+        setErrorMessage(
+          "Camera and microphone access is unavailable. On mobile devices, browsers require a secure origin (HTTPS or localhost)."
+        );
+        setConnectionStatus("ERROR");
+        return null;
+      }
+
+      let stream = null;
+
+      // Stage 1: Try ideal resolution constraints
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
             facingMode: "user",
           },
           audio: {
@@ -208,23 +296,49 @@ export function useWebRTC({
             autoGainControl: true,
           },
         });
-      } catch (videoError) {
-        console.warn("Video + Audio capture failed, trying audio-only fallback:", videoError);
-        // Fallback to audio only if camera is not found or in use
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: false,
-          audio: true,
-        });
-        setIsCameraOn(false);
+      } catch (firstErr) {
+        console.warn("[WebRTC] Ideal 720p constraints failed, trying basic { video: true, audio: true }:", firstErr);
+        // Stage 2: Fallback to basic video+audio (resolves mobile aspect ratio errors)
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+        } catch (secondErr) {
+          console.warn("[WebRTC] Video capture failed completely, falling back to audio-only:", secondErr);
+          // Stage 3: Audio only fallback
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: true,
+          });
+          setIsCameraOn(false);
+        }
       }
 
       localStreamRef.current = stream;
       setLocalStream(stream);
       bindLocalVideo();
 
+      // If any RTCPeerConnections were already created, attach/replace tracks
+      peerConnectionsRef.current.forEach((pc, targetId) => {
+        const senders = pc.getSenders();
+        stream.getTracks().forEach((track) => {
+          const sender = senders.find((s) => s.track && s.track.kind === track.kind);
+          if (sender) {
+            sender.replaceTrack(track).catch((e) => console.warn(`[WebRTC] replaceTrack error for ${targetId}:`, e));
+          } else {
+            try {
+              pc.addTrack(track, stream);
+            } catch (e) {
+              console.warn(`[WebRTC] addTrack error for ${targetId}:`, e);
+            }
+          }
+        });
+      });
+
       return stream;
     } catch (err) {
-      console.error("getUserMedia error:", err);
+      console.error("[WebRTC] getUserMedia error:", err);
       if (
         err.name === "NotAllowedError" ||
         err.name === "PermissionDeniedError" ||
@@ -248,9 +362,48 @@ export function useWebRTC({
     }
   }, [bindLocalVideo]);
 
+  // Clean up media and WebRTC connections
+  const cleanupConnection = useCallback(() => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.warn("[WebRTC] Error stopping track:", e);
+        }
+      });
+      localStreamRef.current = null;
+      setLocalStream(null);
+    }
+
+    peerConnectionsRef.current.forEach((pc, sockId) => {
+      try {
+        pc.close();
+      } catch (e) {
+        console.warn(`[WebRTC] Error closing pc for ${sockId}:`, e);
+      }
+    });
+    peerConnectionsRef.current.clear();
+    iceQueuesRef.current.clear();
+    peerInfoMapRef.current.clear();
+    remoteStreamsRef.current.clear();
+
+    if (socketRef.current) {
+      try {
+        socketRef.current.emit("leave-consultation");
+        socketRef.current.disconnect();
+      } catch (e) {
+        console.warn("[WebRTC] Error disconnecting socket:", e);
+      }
+      socketRef.current = null;
+    }
+
+    setRemotePeers([]);
+  }, []);
+
   // Connect to Socket.IO and join consultation room
   const startConsultation = useCallback(async () => {
-    if (!appointmentId) return;
+    if (!normalizedAppointmentId) return;
 
     setConnectionStatus("INITIALIZING");
     setStatusMessage("Connecting to HealTalk telehealth signaling server...");
@@ -267,8 +420,9 @@ export function useWebRTC({
       return;
     }
 
-    // Connect socket
-    const socket = io({
+    // Connect socket (defaults to current host or VITE_SOCKET_URL)
+    const socketUrl = import.meta.env.VITE_SOCKET_URL || undefined;
+    const socket = io(socketUrl, {
       path: "/socket.io",
       auth: { token },
       transports: ["websocket", "polling"],
@@ -278,13 +432,13 @@ export function useWebRTC({
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      console.log(`[WebRTC Client] Socket connected: ${socket.id}`);
+      console.log(`[WebRTC Client] Socket connected: ${socket.id} for room appointment_${normalizedAppointmentId}`);
       setStatusMessage("Joining consultation room...");
 
       socket.emit(
         "join-consultation",
         {
-          appointmentId,
+          appointmentId: normalizedAppointmentId,
           token,
           role: user?.role || "patient",
           userName: user?.name || "Participant",
@@ -303,117 +457,242 @@ export function useWebRTC({
       console.log("[WebRTC Client] consultation-joined event:", { existingPeers, appointment });
 
       if (existingPeers && existingPeers.length > 0) {
-        const peer = existingPeers[0];
-        setPeerInfo(peer);
-        setRemoteMediaState({
-          isVideoEnabled: peer.isVideoEnabled !== false,
-          isAudioEnabled: peer.isAudioEnabled !== false,
-        });
+        // Register all existing peers and initiate offers to all of them
+        existingPeers.forEach((peer) => {
+          peerInfoMapRef.current.set(peer.socketId, peer);
 
-        // We are the joiner, initiate offer to existing peer
-        initiateOffer(peer.socketId);
+          setRemotePeers((prev) => {
+            const index = prev.findIndex(
+              (p) => p.socketId === peer.socketId || (peer.role && p.role === peer.role)
+            );
+            const peerItem = {
+              socketId: peer.socketId,
+              peerInfo: peer,
+              stream: index >= 0 ? prev[index].stream : null,
+              role: peer.role,
+              userName: peer.userName,
+              isVideoEnabled: peer.isVideoEnabled !== false,
+              isAudioEnabled: peer.isAudioEnabled !== false,
+              hasVideoTrack: false,
+              hasAudioTrack: false,
+              lastUpdated: Date.now(),
+            };
+
+            if (index >= 0) {
+              const updated = [...prev];
+              updated[index] = peerItem;
+              return updated;
+            }
+            return [...prev, peerItem];
+          });
+
+          // Joiner initiates WebRTC offer to this existing peer
+          initiateOffer(peer.socketId, peer);
+        });
       } else {
         setConnectionStatus("WAITING_FOR_PEER");
         const waitingFor =
-          user?.role === "doctor" ? "patient" : "doctor";
-        setStatusMessage(
-          `Waiting for ${waitingFor} to enter the consultation room...`
-        );
+          user?.role === "doctor"
+            ? "patient and interpreter"
+            : user?.role === "interpreter"
+            ? "doctor and patient"
+            : "doctor";
+        setStatusMessage(`Waiting for ${waitingFor} to enter the consultation room...`);
       }
     });
 
     // Another peer entered the room
     socket.on("peer-joined", (newPeer) => {
       console.log("[WebRTC Client] peer-joined event:", newPeer);
-      setPeerInfo(newPeer);
-      setRemoteMediaState({
-        isVideoEnabled: newPeer.isVideoEnabled !== false,
-        isAudioEnabled: newPeer.isAudioEnabled !== false,
+      peerInfoMapRef.current.set(newPeer.socketId, newPeer);
+
+      setRemotePeers((prev) => {
+        const index = prev.findIndex(
+          (p) => p.socketId === newPeer.socketId || (newPeer.role && p.role === newPeer.role)
+        );
+        const peerItem = {
+          socketId: newPeer.socketId,
+          peerInfo: newPeer,
+          stream: index >= 0 ? prev[index].stream : null,
+          role: newPeer.role,
+          userName: newPeer.userName,
+          isVideoEnabled: newPeer.isVideoEnabled !== false,
+          isAudioEnabled: newPeer.isAudioEnabled !== false,
+          hasVideoTrack: false,
+          hasAudioTrack: false,
+          lastUpdated: Date.now(),
+        };
+
+        if (index >= 0) {
+          const updated = [...prev];
+          updated[index] = peerItem;
+          return updated;
+        }
+        return [...prev, peerItem];
       });
+
       setConnectionStatus("CONNECTING");
-      setStatusMessage(`Connecting stream with ${newPeer.userName}...`);
-      // Target socket id set; new peer will send an offer, or we can handle offer
-      targetSocketIdRef.current = newPeer.socketId;
+      setStatusMessage(`${newPeer.userName} (${newPeer.role}) entered the room...`);
     });
 
     // Handling incoming WebRTC offer
     socket.on("signal-offer", async ({ senderSocketId, senderInfo, offer }) => {
-      console.log("[WebRTC Client] Received signal-offer from", senderSocketId);
+      console.log(`[WebRTC Client] Received signal-offer from ${senderSocketId} (${senderInfo?.role}, ${senderInfo?.userName})`);
       try {
-        if (senderInfo) setPeerInfo(senderInfo);
+        if (senderInfo) {
+          peerInfoMapRef.current.set(senderSocketId, senderInfo);
+
+          setRemotePeers((prev) => {
+            const index = prev.findIndex(
+              (p) => p.socketId === senderSocketId || (senderInfo.role && p.role === senderInfo.role)
+            );
+            const peerItem = {
+              socketId: senderSocketId,
+              peerInfo: senderInfo,
+              stream: index >= 0 ? prev[index].stream : null,
+              role: senderInfo.role,
+              userName: senderInfo.userName,
+              isVideoEnabled: senderInfo.isVideoEnabled !== false,
+              isAudioEnabled: senderInfo.isAudioEnabled !== false,
+              hasVideoTrack: index >= 0 ? prev[index].hasVideoTrack : false,
+              hasAudioTrack: index >= 0 ? prev[index].hasAudioTrack : false,
+              lastUpdated: Date.now(),
+            };
+
+            if (index >= 0) {
+              const updated = [...prev];
+              updated[index] = peerItem;
+              return updated;
+            }
+            return [...prev, peerItem];
+          });
+        }
+
         setConnectionStatus("CONNECTING");
-        setStatusMessage("Establishing encrypted video channel...");
+        setStatusMessage(`Connecting stream with ${senderInfo?.userName || "peer"}...`);
 
-        const pc = createPeerConnection(senderSocketId);
+        const pc = getOrCreatePeerConnection(senderSocketId, senderInfo);
 
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        // WebRTC Glare / collision handling:
+        const isCollision =
+          offer?.type === "offer" &&
+          (pc.signalingState === "have-local-offer" || pc.signalingState !== "stable");
 
-        // Drain any queued ICE candidates
-        while (iceCandidatesQueue.current.length > 0) {
-          const candidate = iceCandidatesQueue.current.shift();
+        const isPolite = socket.id ? socket.id < senderSocketId : true;
+
+        if (isCollision) {
+          if (!isPolite) {
+            console.log(`[WebRTC] Glare collision with ${senderSocketId}. Impolite peer ignoring incoming offer.`);
+            return;
+          }
+          console.log(`[WebRTC] Glare collision with ${senderSocketId}. Polite peer rolling back local offer.`);
           try {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } catch (e) {
-            console.warn("Error adding queued candidate:", e);
+            await pc.setLocalDescription({ type: "rollback" });
+          } catch (rbErr) {
+            console.warn("[WebRTC] Rollback notice:", rbErr);
           }
         }
 
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        if (pc.signalingState !== "stable" && pc.signalingState !== "have-local-offer") {
+          console.warn(`[WebRTC] Ignoring signal-offer in state: ${pc.signalingState}`);
+          return;
+        }
 
-        socket.emit("signal-answer", {
-          targetSocketId: senderSocketId,
-          answer,
-        });
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+        // Drain any queued ICE candidates for this sender
+        const queue = iceQueuesRef.current.get(senderSocketId) || [];
+        while (queue.length > 0) {
+          const candidate = queue.shift();
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (e) {
+            console.warn("[WebRTC] Error adding queued candidate:", e);
+          }
+        }
+
+        // Only create answer if signalingState is now have-remote-offer
+        if (pc.signalingState === "have-remote-offer") {
+          const answer = await pc.createAnswer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+          });
+          await pc.setLocalDescription(answer);
+
+          socket.emit("signal-answer", {
+            targetSocketId: senderSocketId,
+            answer,
+          });
+        }
       } catch (err) {
-        console.error("Error handling signal-offer:", err);
-        setErrorMessage("Failed to establish video connection: " + err.message);
+        console.error("[WebRTC] Error handling signal-offer:", err);
+        if (!err.message?.includes("wrong state")) {
+          setErrorMessage("Failed to establish video connection: " + err.message);
+        }
       }
     });
 
     // Handling incoming WebRTC answer
-    socket.on("signal-answer", async ({ senderSocketId, answer }) => {
-      console.log("[WebRTC Client] Received signal-answer from", senderSocketId);
+    socket.on("signal-answer", async ({ senderSocketId, senderInfo, answer }) => {
+      console.log(`[WebRTC Client] Received signal-answer from ${senderSocketId}`);
       try {
-        const pc = peerConnectionRef.current;
+        if (senderInfo) {
+          peerInfoMapRef.current.set(senderSocketId, senderInfo);
+        }
+        const pc = peerConnectionsRef.current.get(senderSocketId);
         if (pc) {
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          if (pc.signalingState === "have-local-offer") {
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
 
-          // Drain queued candidates
-          while (iceCandidatesQueue.current.length > 0) {
-            const candidate = iceCandidatesQueue.current.shift();
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (e) {
-              console.warn("Error adding queued candidate:", e);
+            // Drain queued candidates for this sender
+            const queue = iceQueuesRef.current.get(senderSocketId) || [];
+            while (queue.length > 0) {
+              const candidate = queue.shift();
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                console.warn("[WebRTC] Error adding queued candidate:", e);
+              }
             }
+          } else {
+            console.log(`[WebRTC] Ignoring signal-answer because signalingState is ${pc.signalingState}`);
           }
         }
       } catch (err) {
-        console.error("Error setting remote description from answer:", err);
+        console.error("[WebRTC] Error setting remote description from answer:", err);
       }
     });
 
     // Handling incoming ICE candidates
     socket.on("signal-ice-candidate", async ({ senderSocketId, candidate }) => {
       try {
-        const pc = peerConnectionRef.current;
+        const pc = peerConnectionsRef.current.get(senderSocketId);
         if (pc && pc.remoteDescription && pc.remoteDescription.type) {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } else {
-          iceCandidatesQueue.current.push(candidate);
+          if (!iceQueuesRef.current.has(senderSocketId)) {
+            iceQueuesRef.current.set(senderSocketId, []);
+          }
+          iceQueuesRef.current.get(senderSocketId).push(candidate);
         }
       } catch (err) {
-        console.warn("Error adding ice candidate:", err);
+        console.warn("[WebRTC] Error adding ice candidate:", err);
       }
     });
 
     // Remote peer toggled audio/video
-    socket.on("peer-media-toggled", ({ type, enabled }) => {
-      setRemoteMediaState((prev) => ({
-        ...prev,
-        [type === "video" ? "isVideoEnabled" : "isAudioEnabled"]: enabled,
-      }));
+    socket.on("peer-media-toggled", ({ socketId: targetSockId, type, enabled }) => {
+      setRemotePeers((prev) =>
+        prev.map((p) => {
+          if (p.socketId === targetSockId) {
+            return {
+              ...p,
+              [type === "video" ? "isVideoEnabled" : "isAudioEnabled"]: enabled,
+            };
+          }
+          return p;
+        })
+      );
     });
 
     // In-room live chat message received
@@ -422,15 +701,33 @@ export function useWebRTC({
     });
 
     // Peer left room
-    socket.on("peer-left", ({ userName, role }) => {
-      console.log(`[WebRTC Client] Peer left: ${userName} (${role})`);
-      setRemoteStream(null);
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = null;
+    socket.on("peer-left", ({ socketId: leftSockId, userName, role }) => {
+      console.log(`[WebRTC Client] Peer left: ${userName} (${role}, ${leftSockId})`);
+
+      const pc = peerConnectionsRef.current.get(leftSockId);
+      if (pc) {
+        try {
+          pc.close();
+        } catch (e) {
+          console.warn("[WebRTC] Error closing pc on peer-left:", e);
+        }
+        peerConnectionsRef.current.delete(leftSockId);
       }
-      setPeerInfo(null);
-      setConnectionStatus("WAITING_FOR_PEER");
-      setStatusMessage(`${userName || "Peer"} has left the consultation.`);
+      iceQueuesRef.current.delete(leftSockId);
+      peerInfoMapRef.current.delete(leftSockId);
+      remoteStreamsRef.current.delete(leftSockId);
+
+      setRemotePeers((prev) => {
+        const remaining = prev.filter((p) => p.socketId !== leftSockId);
+        if (remaining.length === 0) {
+          setConnectionStatus("WAITING_FOR_PEER");
+          setStatusMessage(`${userName || "Peer"} has left the consultation.`);
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null;
+          }
+        }
+        return remaining;
+      });
     });
 
     // Consultation ended by doctor or patient
@@ -445,60 +742,26 @@ export function useWebRTC({
     });
 
     socket.on("consultation-error", ({ message }) => {
+      console.warn("[WebRTC Client] consultation-error:", message);
       setErrorMessage(message || "Consultation connection error");
       setConnectionStatus("ERROR");
     });
 
     socket.on("connect_error", (err) => {
-      console.error("Socket connect error:", err);
+      console.error("[WebRTC Client] Socket connect error:", err);
       setErrorMessage("Could not connect to telehealth signaling server.");
       setConnectionStatus("ERROR");
     });
   }, [
-    appointmentId,
+    normalizedAppointmentId,
     user,
     setupLocalMedia,
     permissionDenied,
     initiateOffer,
-    createPeerConnection,
+    getOrCreatePeerConnection,
+    cleanupConnection,
     onConsultationEnded,
   ]);
-
-  // Clean up media and WebRTC connections
-  const cleanupConnection = useCallback(() => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch (e) {
-          console.warn("Error stopping track:", e);
-        }
-      });
-      localStreamRef.current = null;
-      setLocalStream(null);
-    }
-
-    if (peerConnectionRef.current) {
-      try {
-        peerConnectionRef.current.close();
-      } catch (e) {
-        console.warn("Error closing pc:", e);
-      }
-      peerConnectionRef.current = null;
-    }
-
-    if (socketRef.current) {
-      try {
-        socketRef.current.emit("leave-consultation");
-        socketRef.current.disconnect();
-      } catch (e) {
-        console.warn("Error disconnecting socket:", e);
-      }
-      socketRef.current = null;
-    }
-
-    setRemoteStream(null);
-  }, []);
 
   // Toggle Microphone
   const toggleMic = useCallback(() => {
@@ -520,7 +783,7 @@ export function useWebRTC({
   }, [isMicOn]);
 
   // Toggle Camera
-  const toggleCamera = useCallback(() => {
+  const toggleCamera = useCallback(async () => {
     if (localStreamRef.current) {
       const videoTracks = localStreamRef.current.getVideoTracks();
       if (videoTracks.length > 0) {
@@ -534,9 +797,54 @@ export function useWebRTC({
             enabled: nextState,
           });
         }
+      } else {
+        // Stream had no video track (e.g. initial fallback occurred)
+        try {
+          if (navigator?.mediaDevices?.getUserMedia) {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                width: { ideal: 1280, max: 1920 },
+                height: { ideal: 720, max: 1080 },
+                facingMode: "user",
+              },
+            });
+            const newTrack = stream.getVideoTracks()[0];
+            if (newTrack) {
+              localStreamRef.current.addTrack(newTrack);
+              peerConnectionsRef.current.forEach((pc) => {
+                const senders = pc.getSenders();
+                const vSender = senders.find((s) => s.track && s.track.kind === "video");
+                if (vSender) {
+                  vSender.replaceTrack(newTrack).catch((e) => console.warn("[WebRTC] replaceTrack error:", e));
+                } else {
+                  try {
+                    pc.addTrack(newTrack, localStreamRef.current);
+                  } catch (e) {
+                    console.warn("[WebRTC] addTrack error:", e);
+                  }
+                }
+              });
+              setIsCameraOn(true);
+              bindLocalVideo();
+              if (socketRef.current) {
+                socketRef.current.emit("toggle-media", {
+                  type: "video",
+                  enabled: true,
+                });
+              }
+            }
+          }
+        } catch (camErr) {
+          console.warn("[WebRTC] Camera could not be activated:", camErr);
+          setErrorMessage(
+            camErr.name === "NotReadableError" || camErr.name === "TrackStartError"
+              ? "Your camera is currently in use by another browser or tab. On Windows, only one application can use the webcam at a time."
+              : "Could not activate camera: " + camErr.message
+          );
+        }
       }
     }
-  }, [isCameraOn]);
+  }, [isCameraOn, bindLocalVideo]);
 
   // Send in-session chat message
   const sendChatMessage = useCallback((text) => {
@@ -546,13 +854,13 @@ export function useWebRTC({
 
   // End consultation
   const endConsultation = useCallback((notes = "") => {
-    if (socketRef.current && appointmentId) {
-      socketRef.current.emit("end-consultation", { appointmentId, notes });
+    if (socketRef.current && normalizedAppointmentId) {
+      socketRef.current.emit("end-consultation", { appointmentId: normalizedAppointmentId, notes });
     }
     cleanupConnection();
     setConnectionStatus("ENDED");
     setStatusMessage("Consultation ended.");
-  }, [appointmentId, cleanupConnection]);
+  }, [normalizedAppointmentId, cleanupConnection]);
 
   // Leave consultation
   const leaveConsultation = useCallback(() => {
@@ -561,15 +869,24 @@ export function useWebRTC({
     setStatusMessage("You left the consultation.");
   }, [cleanupConnection]);
 
-  // Auto connect when appointmentId is provided
+  // Auto connect when normalizedAppointmentId is provided
   useEffect(() => {
-    if (appointmentId) {
+    if (normalizedAppointmentId) {
       startConsultation();
     }
     return () => {
       cleanupConnection();
     };
-  }, [appointmentId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [normalizedAppointmentId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Compatibility helpers for 1-on-1 calls
+  const primaryRemotePeer = remotePeers.length > 0 ? remotePeers[0] : null;
+  const remoteStream = primaryRemotePeer?.stream || null;
+  const peerInfo = primaryRemotePeer?.peerInfo || null;
+  const remoteMediaState = {
+    isVideoEnabled: primaryRemotePeer?.isVideoEnabled !== false,
+    isAudioEnabled: primaryRemotePeer?.isAudioEnabled !== false,
+  };
 
   // Bind video element whenever localStream changes
   useEffect(() => {
@@ -578,6 +895,13 @@ export function useWebRTC({
     }
   }, [localStream, bindLocalVideo]);
 
+  // Bind primary remote video element whenever remoteStream changes (1-on-1 calls)
+  useEffect(() => {
+    if (remoteStream && remoteVideoRef.current) {
+      bindRemoteVideo(remoteStream);
+    }
+  }, [remoteStream, bindRemoteVideo]);
+
   return {
     connectionStatus,
     statusMessage,
@@ -585,6 +909,7 @@ export function useWebRTC({
     permissionDenied,
     localStream,
     remoteStream,
+    remotePeers, // Array of all connected remote peers for 3-way calls
     isMicOn,
     isCameraOn,
     peerInfo,

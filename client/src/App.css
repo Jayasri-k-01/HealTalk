@@ -4203,6 +4203,12 @@ body {
   color: #0c4a6e;
 }
 
+.interpreter-msg {
+  background: #eef2ff;
+  border-left: 3px solid #6366f1;
+  color: #312e81;
+}
+
 .msg-author-row {
   display: flex;
   justify-content: space-between;

@@ -23,7 +23,7 @@ import {
   ArrowUpDown,
   RefreshCw,
 } from "lucide-react";
-import { fetchDoctorAppointments, cancelAppointment } from "../../../services/appointmentService";
+import { fetchDoctorAppointments, cancelAppointment, confirmAppointment } from "../../../services/appointmentService";
 
 // Helper to parse Appointment Date + Time accurately into a JavaScript Date object
 const parseAppointmentDateTime = (dateStr, timeStr) => {
@@ -79,10 +79,11 @@ const isAppointmentUpcoming = (apt) => {
   return aptDate.getTime() >= now.getTime();
 };
 
-// Returns true if appointment is eligible to be joined
+// Returns true if appointment is eligible to be joined (MUST BE CONFIRMED OR IN PROGRESS)
 const isAppointmentJoinable = (apt) => {
   if (!apt) return false;
-  if (apt.status === "Completed" || apt.status === "Cancelled") {
+  // CRITICAL: A Pending or Cancelled or Completed appointment must NEVER be joinable
+  if (apt.status !== "Confirmed" && apt.status !== "In Progress") {
     return false;
   }
 
@@ -90,16 +91,16 @@ const isAppointmentJoinable = (apt) => {
   if (!aptDate) return false;
 
   const now = new Date();
-  // Eligible if upcoming or active within 60 minutes after scheduled start time today
-  const windowEnd = new Date(aptDate.getTime() + 60 * 60 * 1000);
-  return now.getTime() <= windowEnd.getTime() && aptDate.getTime() <= (now.getTime() + 30 * 60 * 1000);
+  // Eligible if active or within today's window
+  const windowEnd = new Date(aptDate.getTime() + 120 * 60 * 1000);
+  return now.getTime() <= windowEnd.getTime() && aptDate.getTime() <= (now.getTime() + 60 * 60 * 1000);
 };
 
 function DoctorAppointmentsTab({ onNavigateTab }) {
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [activeFilter, setActiveFilter] = useState("all"); // all, upcoming, completed, cancelled
+  const [activeFilter, setActiveFilter] = useState("all"); // all, pending, upcoming, completed, cancelled
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState("list"); // list, calendar
   const [selectedAppointment, setSelectedAppointment] = useState(null);
@@ -126,6 +127,10 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
           const patientEmail = patientObj?.email || "";
           const patientPhone = patientObj?.phone || "";
           const language = patientObj?.language || apt.interpreterLanguage || "English";
+          const requiresInterpreter = !!apt.interpreterRequested;
+          const interpreterStatus = apt.interpreterStatus || (requiresInterpreter ? "Requested" : "Not Requested");
+          const interpreterLanguage = apt.interpreterLanguage || (requiresInterpreter ? language : null);
+          const interpreterName = apt.interpreter?.name || (interpreterLanguage ? `${interpreterLanguage} Interpreter` : null);
 
           return {
             id: String(apt._id),
@@ -140,9 +145,13 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
             type: isVideo ? "video" : "chat",
             rawType: apt.type || "Video Call",
             language,
-            requiresInterpreter: !!apt.interpreterRequested,
-            interpreterName: apt.interpreterLanguage ? `${apt.interpreterLanguage} Interpreter` : null,
-            status: apt.status || "Confirmed",
+            requiresInterpreter,
+            interpreterRequested: requiresInterpreter,
+            interpreterLanguage,
+            interpreterStatus,
+            interpreter: apt.interpreter || null,
+            interpreterName,
+            status: apt.status || "Pending",
             reason: apt.reason || "Medical Consultation",
             symptoms: apt.reason || "",
             notes: apt.notes || "",
@@ -165,7 +174,7 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
     loadAppointments();
   }, [loadAppointments]);
 
-  // Real Cancellation Handler connected to backend PUT /api/appointments/:id/cancel
+  // Real Cancellation / Rejection Handler connected to backend PUT /api/appointments/:id/cancel
   const handleCancelAppointment = async (aptId) => {
     try {
       setActionLoading(true);
@@ -176,7 +185,7 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
       if (selectedAppointment && selectedAppointment.id === aptId) {
         setSelectedAppointment((prev) => ({ ...prev, status: "Cancelled" }));
       }
-      showToast("Appointment cancelled successfully in MongoDB");
+      showToast("Appointment cancelled / rejected successfully.");
     } catch (err) {
       console.error("Failed to cancel appointment:", err);
       showToast(err.message || "Failed to cancel appointment");
@@ -185,11 +194,33 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
     }
   };
 
+  // Real Accept / Confirm Handler connected to backend PUT /api/appointments/:id/confirm
+  const handleConfirmAppointment = async (aptId) => {
+    try {
+      setActionLoading(true);
+      await confirmAppointment(aptId);
+      setAppointments((prev) =>
+        prev.map((apt) => (apt.id === aptId ? { ...apt, status: "Confirmed" } : apt))
+      );
+      if (selectedAppointment && selectedAppointment.id === aptId) {
+        setSelectedAppointment((prev) => ({ ...prev, status: "Confirmed" }));
+      }
+      showToast("Appointment accepted & confirmed. You can now start the consultation when ready.");
+    } catch (err) {
+      console.error("Failed to confirm appointment:", err);
+      showToast(err.message || "Failed to confirm appointment");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   // Filter and Search Logic
   const filteredAppointments = appointments.filter((apt) => {
     let matchesFilter = true;
-    if (activeFilter === "upcoming") {
-      matchesFilter = isAppointmentUpcoming(apt);
+    if (activeFilter === "pending") {
+      matchesFilter = apt.status === "Pending";
+    } else if (activeFilter === "upcoming") {
+      matchesFilter = apt.status === "Confirmed" || apt.status === "In Progress" || isAppointmentUpcoming(apt);
     } else if (activeFilter === "completed") {
       matchesFilter = apt.status === "Completed";
     } else if (activeFilter === "cancelled") {
@@ -239,7 +270,8 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
     );
   }
 
-  const upcomingCount = appointments.filter(isAppointmentUpcoming).length;
+  const pendingCount = appointments.filter((a) => a.status === "Pending").length;
+  const upcomingCount = appointments.filter((a) => a.status === "Confirmed" || a.status === "In Progress" || isAppointmentUpcoming(a)).length;
   const completedCount = appointments.filter((a) => a.status === "Completed").length;
   const cancelledCount = appointments.filter((a) => a.status === "Cancelled").length;
 
@@ -294,10 +326,17 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
           </button>
           <button
             type="button"
+            className={`filter-tab-btn ${activeFilter === "pending" ? "active" : ""}`}
+            onClick={() => setActiveFilter("pending")}
+          >
+            Pending Requests ({pendingCount})
+          </button>
+          <button
+            type="button"
             className={`filter-tab-btn ${activeFilter === "upcoming" ? "active" : ""}`}
             onClick={() => setActiveFilter("upcoming")}
           >
-            Upcoming ({upcomingCount})
+            Confirmed / Upcoming ({upcomingCount})
           </button>
           <button
             type="button"
@@ -434,26 +473,49 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
                         </td>
                         <td>
                           <div className="table-actions-cell">
-                            {isAppointmentJoinable(apt) ? (
+                            {apt.status === "Pending" ? (
                               <button
                                 type="button"
                                 className="doctor-btn-primary doctor-btn-sm"
-                                onClick={() => onNavigateTab("consultations", apt)}
-                                title="Enter live consultation room"
+                                onClick={() => setSelectedAppointment(apt)}
+                                title="View & respond to appointment request"
+                                style={{ background: "#d97706", borderColor: "#d97706" }}
                               >
-                                <Video size={13} />
-                                <span>Join</span>
+                                <Eye size={13} />
+                                <span>View Request</span>
                               </button>
-                            ) : null}
-                            <button
-                              type="button"
-                              className="doctor-btn-secondary doctor-btn-sm"
-                              onClick={() => setSelectedAppointment(apt)}
-                              title="View full appointment details"
-                            >
-                              <Eye size={13} />
-                              <span>Details</span>
-                            </button>
+                            ) : isAppointmentJoinable(apt) ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="doctor-btn-primary doctor-btn-sm"
+                                  onClick={() => onNavigateTab("consultations", apt)}
+                                  title="Enter live consultation room"
+                                >
+                                  <Video size={13} />
+                                  <span>{apt.status === "In Progress" ? "Continue" : "Start Consulting"}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="doctor-btn-secondary doctor-btn-sm"
+                                  onClick={() => setSelectedAppointment(apt)}
+                                  title="View full appointment details"
+                                >
+                                  <Eye size={13} />
+                                  <span>Details</span>
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="doctor-btn-secondary doctor-btn-sm"
+                                onClick={() => setSelectedAppointment(apt)}
+                                title="View full appointment details"
+                              >
+                                <Eye size={13} />
+                                <span>Details</span>
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -694,8 +756,10 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
                       </div>
                       <p className="doc-apt-interp-desc">
                         {selectedAppointment.requiresInterpreter
-                          ? `Live certified medical interpreter assigned: ${selectedAppointment.interpreterName || "Assigned on session start"}`
-                          : "Patient is fluent in primary language. AI real-time subtitles available during session."}
+                          ? selectedAppointment.interpreterStatus === "Accepted"
+                            ? `Certified Interpreter Assigned: ${selectedAppointment.interpreter?.name || selectedAppointment.interpreterName} (${selectedAppointment.interpreterLanguage})`
+                            : `Interpreter Requested: ${selectedAppointment.interpreterLanguage} (Pending Interpreter Match)`
+                          : "Patient has not requested an interpreter for this session."}
                       </p>
                     </div>
                   </div>
@@ -719,7 +783,24 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
             {/* Footer Actions */}
             <div className="doc-apt-modal-footer">
               <div className="doc-apt-footer-left">
-                {selectedAppointment.status !== "Cancelled" && (
+                {selectedAppointment.status === "Pending" && (
+                  <button
+                    type="button"
+                    className="doc-apt-btn-cancel"
+                    disabled={actionLoading}
+                    onClick={() => handleCancelAppointment(selectedAppointment.id)}
+                  >
+                    {actionLoading ? (
+                      <>
+                        <Loader2 size={12} className="doctor-spin-icon" />
+                        <span>Processing...</span>
+                      </>
+                    ) : (
+                      "Reject Request"
+                    )}
+                  </button>
+                )}
+                {selectedAppointment.status === "Confirmed" && (
                   <button
                     type="button"
                     className="doc-apt-btn-cancel"
@@ -738,7 +819,33 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
                 )}
               </div>
               <div className="doc-apt-footer-right">
-                {isAppointmentJoinable(selectedAppointment) && (
+                {selectedAppointment.status === "Pending" && (
+                  <button
+                    type="button"
+                    className="doctor-btn-primary"
+                    style={{
+                      background: "#16a34a",
+                      borderColor: "#16a34a",
+                      color: "#ffffff",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      padding: "8px 18px",
+                      borderRadius: "8px",
+                      fontWeight: "600",
+                    }}
+                    disabled={actionLoading}
+                    onClick={() => handleConfirmAppointment(selectedAppointment.id)}
+                  >
+                    {actionLoading ? (
+                      <Loader2 size={14} className="doctor-spin-icon" />
+                    ) : (
+                      <CheckCircle2 size={15} />
+                    )}
+                    <span>Accept Appointment</span>
+                  </button>
+                )}
+                {(selectedAppointment.status === "Confirmed" || selectedAppointment.status === "In Progress") && (
                   <button
                     type="button"
                     className="doc-apt-btn-join"
@@ -749,7 +856,29 @@ function DoctorAppointmentsTab({ onNavigateTab }) {
                     }}
                   >
                     <Video size={14} />
-                    <span>Enter Consultation Room</span>
+                    <span>{selectedAppointment.status === "In Progress" ? "Continue Consultation" : "Start Consulting"}</span>
+                  </button>
+                )}
+                {selectedAppointment.status === "Completed" && (
+                  <button
+                    type="button"
+                    className="doctor-btn-secondary"
+                    onClick={() => {
+                      const apt = selectedAppointment;
+                      setSelectedAppointment(null);
+                      onNavigateTab("prescriptions", {
+                        patientName: apt.patientName,
+                        patientId: apt.patientId,
+                        patientAge: apt.patientAge,
+                        patientGender: apt.patientGender,
+                        diagnosis: apt.reason,
+                        preferredLanguage: apt.language,
+                        appointmentId: apt.id,
+                      });
+                    }}
+                  >
+                    <FileText size={14} />
+                    <span>View / Issue Prescription</span>
                   </button>
                 )}
                 <button

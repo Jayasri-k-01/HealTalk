@@ -41,6 +41,20 @@ const appointmentSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    interpreter: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    interpreterStatus: {
+      type: String,
+      enum: ["Not Requested", "Requested", "Accepted", "Active", "Completed", "Cancelled"],
+      default: "Not Requested",
+    },
+    interpreterAssignedAt: {
+      type: Date,
+      default: null,
+    },
     reason: {
       type: String,
       required: true,

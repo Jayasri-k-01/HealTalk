@@ -55,6 +55,20 @@ export const cancelAppointment = async (id) => {
 };
 
 /**
+ * Confirm / Accept an appointment (Doctor or Admin)
+ * @param {string} id - Appointment ID
+ */
+export const confirmAppointment = async (id) => {
+  try {
+    const response = await API.put(`/appointments/${id}/confirm`);
+    return response.data;
+  } catch (error) {
+    const message = error.response?.data?.message || "Failed to confirm appointment";
+    throw new Error(message);
+  }
+};
+
+/**
  * Fetch appointment by ID with patient data and past records
  * @param {string} id - Appointment ID
  */
@@ -97,3 +111,58 @@ export const requestAppointmentInterpreter = async (id, language) => {
     throw new Error(message);
   }
 };
+
+/**
+ * Fetch available interpreter requests matching logged-in interpreter's languages
+ */
+export const fetchAvailableInterpreterRequests = async () => {
+  try {
+    const response = await API.get("/appointments/interpreter/requests");
+    return response.data;
+  } catch (error) {
+    const message = error.response?.data?.message || "Failed to fetch interpreter requests";
+    throw new Error(message);
+  }
+};
+
+/**
+ * Fetch assignments for logged-in interpreter
+ */
+export const fetchMyInterpreterAssignments = async () => {
+  try {
+    const response = await API.get("/appointments/interpreter/my");
+    return response.data;
+  } catch (error) {
+    const message = error.response?.data?.message || "Failed to fetch your assigned interpreter sessions";
+    throw new Error(message);
+  }
+};
+
+/**
+ * Accept an interpreter request
+ * @param {string} id - Appointment ID
+ */
+export const acceptInterpreterRequest = async (id) => {
+  try {
+    const response = await API.put(`/appointments/${id}/interpreter/accept`);
+    return response.data;
+  } catch (error) {
+    const message = error.response?.data?.message || "Failed to accept interpreter request";
+    throw new Error(message);
+  }
+};
+
+/**
+ * Reject or release an interpreter assignment
+ * @param {string} id - Appointment ID
+ */
+export const rejectInterpreterRequest = async (id) => {
+  try {
+    const response = await API.put(`/appointments/${id}/interpreter/reject`);
+    return response.data;
+  } catch (error) {
+    const message = error.response?.data?.message || "Failed to decline interpreter request";
+    throw new Error(message);
+  }
+};
+

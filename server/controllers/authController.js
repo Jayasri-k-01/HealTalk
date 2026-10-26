@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 
 const registerUser = async (req, res) => {
   try {
-    const { name, email, password, role, language, phone, specialty } = req.body;
+    const { name, email, password, role, language, languages, phone, specialty } = req.body;
 
     const existingUser = await User.findOne({ email });
 
@@ -17,14 +17,24 @@ const registerUser = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    let userLanguages = [];
+    if (Array.isArray(languages) && languages.length > 0) {
+      userLanguages = languages;
+    } else if (language) {
+      userLanguages = language.split(",").map((l) => l.trim()).filter(Boolean);
+    }
+
     const user = await User.create({
       name,
       email,
       password: hashedPassword,
       role: role || "patient",
       language: language || "English",
+      languages: userLanguages,
       phone: phone || "",
       specialization: specialty || "",
+      status: role === "patient" ? "approved" : "approved",
+      isVerified: true,
     });
 
     if (user.role === "doctor") {
@@ -76,7 +86,14 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail });
 
     if (!user) {
       return res.status(401).json({
@@ -302,6 +319,26 @@ const seedDefaultAccounts = async () => {
         },
       });
       console.log("[Seed] Default Patient account created: patient@healtalk.com / Patient@123");
+    }
+
+    // 4. Interpreter
+    const interpreterExists = await User.findOne({ email: "interpreter@healtalk.com" });
+    if (!interpreterExists) {
+      const hashedPassword = await bcrypt.hash("Interpreter@123", 10);
+      await User.create({
+        name: "Carlos Mendez",
+        email: "interpreter@healtalk.com",
+        password: hashedPassword,
+        role: "interpreter",
+        language: "Spanish",
+        languages: ["English", "Spanish", "French", "Hindi", "Tamil", "German", "Russian"],
+        qualification: "Certified Medical Interpreter (CMI)",
+        experience: "8 years professional hospital interpreting",
+        specialization: "Medical & Clinical Interpretation",
+        status: "approved",
+        isVerified: true,
+      });
+      console.log("[Seed] Default Interpreter account created: interpreter@healtalk.com / Interpreter@123");
     }
   } catch (err) {
     console.error("[Seed] Error seeding default accounts:", err.message);

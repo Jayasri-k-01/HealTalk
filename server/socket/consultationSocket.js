@@ -24,25 +24,36 @@ const verifyToken = (token) => {
  * Check if the user is authorized to join the consultation for this appointment
  */
 const isAuthorizedForAppointment = async (appointment, userId, userRole, userName) => {
-  if (!appointment || !userId) return false;
-  if (userRole === "admin") return true;
+  if (!appointment || !userId) return { isAuthorized: false };
+  if (userRole === "admin") return { isAuthorized: true, participantRole: "admin" };
 
   const userIdStr = String(userId);
 
   // Check if user is the assigned patient
   const patientIdStr = String(
-    appointment.patient?._id || appointment.patient
+    appointment.patient?._id || appointment.patient || ""
   );
-  if (patientIdStr === userIdStr) {
+  if (patientIdStr && patientIdStr === userIdStr) {
     return { isAuthorized: true, participantRole: "patient" };
   }
 
   // Check if user is the assigned doctor
   const doctorIdStr = String(
-    appointment.doctor?._id || appointment.doctor
+    appointment.doctor?._id || appointment.doctor || ""
   );
-  if (doctorIdStr === userIdStr) {
+  if (doctorIdStr && doctorIdStr === userIdStr) {
     return { isAuthorized: true, participantRole: "doctor" };
+  }
+
+  // Check if user is the assigned interpreter
+  const assignedInterpreterId = String(
+    appointment.interpreter?._id || appointment.interpreter || ""
+  );
+  if (
+    assignedInterpreterId &&
+    assignedInterpreterId === userIdStr
+  ) {
+    return { isAuthorized: true, participantRole: "interpreter" };
   }
 
   // Doctor may have a separate Doctor profile referencing their User account
@@ -76,6 +87,10 @@ const isAuthorizedForAppointment = async (appointment, userId, userRole, userNam
     }
   }
 
+  if (userRecord && userRecord.role === "interpreter" && assignedInterpreterId === userIdStr) {
+    return { isAuthorized: true, participantRole: "interpreter" };
+  }
+
   return { isAuthorized: false };
 };
 
@@ -107,10 +122,11 @@ function initConsultationSocket(io) {
         const userId = authData.id;
         const userRole = authData.role || clientRole || "patient";
 
-        // Fetch appointment details
+        // Fetch appointment details with populated references
         const appointment = await Appointment.findById(appointmentId)
           .populate("patient", "name email phone language age gender")
-          .populate("doctor", "name specialty fee rating");
+          .populate("doctor", "name specialty fee rating")
+          .populate("interpreter", "name email language languages specialization");
 
         if (!appointment) {
           const err = "Appointment not found";
@@ -129,6 +145,29 @@ function initConsultationSocket(io) {
 
         if (!authCheck.isAuthorized) {
           const err = "Access denied: You are not a registered participant in this consultation";
+          console.warn(`[Socket] Unauthorized join attempt by userId ${userId} (${userRole}) for appointment ${appointmentId}`);
+          if (callback) callback({ success: false, message: err });
+          socket.emit("consultation-error", { message: err });
+          return;
+        }
+
+        // CRITICAL CHECK: Appointment MUST be Confirmed or In Progress to join consultation room
+        if (appointment.status === "Pending") {
+          const err = "Consultation room is not available: Appointment is pending doctor confirmation.";
+          if (callback) callback({ success: false, message: err });
+          socket.emit("consultation-error", { message: err });
+          return;
+        }
+
+        if (appointment.status === "Cancelled") {
+          const err = "Consultation room is closed: This appointment has been cancelled.";
+          if (callback) callback({ success: false, message: err });
+          socket.emit("consultation-error", { message: err });
+          return;
+        }
+
+        if (appointment.status === "Completed") {
+          const err = "Consultation room is closed: This appointment has already been completed.";
           if (callback) callback({ success: false, message: err });
           socket.emit("consultation-error", { message: err });
           return;
@@ -143,11 +182,48 @@ function initConsultationSocket(io) {
         }
         const participantsMap = roomParticipants.get(roomKey);
 
+        const assignedRole = authCheck.participantRole || userRole;
+        const resolvedName = clientName || (
+          assignedRole === "doctor"
+            ? appointment.doctorName
+            : assignedRole === "interpreter"
+            ? (appointment.interpreter?.name || "Medical Interpreter")
+            : appointment.patient?.name
+        ) || "Participant";
+
+        // Deduplicate stale sockets: If this user or unique role (patient, doctor, interpreter)
+        // already had an existing socket in this room, evict the stale socket!
+        const staleSocketsToEvict = [];
+        participantsMap.forEach((pInfo, existingSockId) => {
+          if (existingSockId !== socket.id) {
+            const sameUserId = String(pInfo.userId) === String(userId);
+            const sameRole = assignedRole && pInfo.role === assignedRole && ["doctor", "patient", "interpreter"].includes(assignedRole);
+            if (sameUserId || sameRole) {
+              staleSocketsToEvict.push(existingSockId);
+            }
+          }
+        });
+
+        staleSocketsToEvict.forEach((staleSockId) => {
+          const staleData = participantsMap.get(staleSockId);
+          console.log(`[Socket] Evicting stale socket ${staleSockId} for ${staleData?.userName} (${staleData?.role}) in ${roomKey}`);
+          participantsMap.delete(staleSockId);
+          socket.to(roomKey).emit("peer-left", {
+            socketId: staleSockId,
+            userName: staleData?.userName,
+            role: staleData?.role,
+          });
+          const staleSock = io.sockets.sockets.get(staleSockId);
+          if (staleSock) {
+            staleSock.leave(roomKey);
+          }
+        });
+
         const participantInfo = {
           socketId: socket.id,
           userId,
-          role: authCheck.participantRole || userRole,
-          userName: clientName || (authCheck.participantRole === "doctor" ? appointment.doctorName : appointment.patient?.name) || "User",
+          role: assignedRole,
+          userName: resolvedName,
           isVideoEnabled: true,
           isAudioEnabled: true,
           joinedAt: new Date(),
@@ -156,15 +232,24 @@ function initConsultationSocket(io) {
         participantsMap.set(socket.id, participantInfo);
         socket.data.consultationInfo = { roomKey, appointmentId, ...participantInfo };
 
-        // If appointment was Confirmed, transition to In Progress
+        // If appointment was Confirmed, transition to In Progress on live room entrance
+        let modified = false;
         if (appointment.status === "Confirmed") {
           appointment.status = "In Progress";
+          modified = true;
         }
         if (!appointment.consultationStartedAt) {
           appointment.consultationStartedAt = new Date();
           appointment.consultationStatus = "in_progress";
+          modified = true;
         }
-        await appointment.save();
+        if (assignedRole === "interpreter" && appointment.interpreterStatus !== "Active") {
+          appointment.interpreterStatus = "Active";
+          modified = true;
+        }
+        if (modified) {
+          await appointment.save();
+        }
 
         // Get existing peers in the room (excluding this socket)
         const existingPeers = [];
@@ -175,7 +260,7 @@ function initConsultationSocket(io) {
         });
 
         console.log(
-          `[Socket] User ${participantInfo.userName} (${participantInfo.role}) joined ${roomKey}. Existing peers: ${existingPeers.length}`
+          `[Socket] User ${participantInfo.userName} (${participantInfo.role}, socket: ${socket.id}) joined ${roomKey}. Existing peers: ${existingPeers.map(p => `${p.userName}[${p.role}]`).join(", ") || "none"}`
         );
 
         // Acknowledge to current user
@@ -202,6 +287,8 @@ function initConsultationSocket(io) {
     // Handler: WebRTC Offer (from caller to receiver)
     socket.on("signal-offer", ({ targetSocketId, offer }) => {
       if (targetSocketId && offer) {
+        const info = socket.data.consultationInfo;
+        console.log(`[Socket] signal-offer from ${socket.id} (${info?.userName || info?.role || "peer"}) -> ${targetSocketId}`);
         io.to(targetSocketId).emit("signal-offer", {
           senderSocketId: socket.id,
           senderInfo: socket.data.consultationInfo,
@@ -213,6 +300,8 @@ function initConsultationSocket(io) {
     // Handler: WebRTC Answer (from receiver back to caller)
     socket.on("signal-answer", ({ targetSocketId, answer }) => {
       if (targetSocketId && answer) {
+        const info = socket.data.consultationInfo;
+        console.log(`[Socket] signal-answer from ${socket.id} (${info?.userName || info?.role || "peer"}) -> ${targetSocketId}`);
         io.to(targetSocketId).emit("signal-answer", {
           senderSocketId: socket.id,
           senderInfo: socket.data.consultationInfo,

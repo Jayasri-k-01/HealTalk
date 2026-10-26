@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   fetchMyAppointments,
   fetchAppointmentById,
@@ -30,6 +30,287 @@ import {
 } from "lucide-react";
 
 /**
+ * Reusable Remote Participant Video Tile for multi-peer calls
+ */
+function RemoteParticipantTile({ peer, defaultLabel, defaultRole }) {
+  const videoElementRef = useRef(null);
+  const [isAudioMutedByPolicy, setIsAudioMutedByPolicy] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  const stream = peer?.stream;
+  const hasVideoTrack = !!(
+    stream &&
+    stream.getVideoTracks().length > 0 &&
+    stream.getVideoTracks().some((t) => t.enabled)
+  );
+  const isVideoVisible = hasVideoTrack && peer?.isVideoEnabled !== false;
+  const isAudioActive = peer?.isAudioEnabled !== false;
+  const role = peer?.role || defaultRole || "doctor";
+  const displayName =
+    peer?.userName ||
+    (role === "interpreter" ? "Medical Interpreter" : defaultLabel || "Participant");
+  const roleLabel =
+    role === "doctor"
+      ? "Doctor"
+      : role === "interpreter"
+      ? "Certified Interpreter"
+      : "Patient";
+
+  useEffect(() => {
+    const videoEl = videoElementRef.current;
+    if (!videoEl || !stream) return;
+
+    if (videoEl.srcObject !== stream) {
+      videoEl.srcObject = stream;
+    }
+
+    const attemptPlay = () => {
+      videoEl
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+          setIsAudioMutedByPolicy(videoEl.muted);
+        })
+        .catch((err) => {
+          console.warn("[WebRTC] Autoplay unmuted video blocked on mobile, falling back to muted:", err);
+          // Fallback: Muted playback starts immediately on mobile browsers
+          videoEl.muted = true;
+          setIsAudioMutedByPolicy(true);
+          videoEl
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch((e) => console.warn("[WebRTC] Muted autoplay also failed:", e));
+        });
+    };
+
+    attemptPlay();
+
+    const handleTrackChange = () => {
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
+      }
+      attemptPlay();
+    };
+
+    stream.addEventListener("addtrack", handleTrackChange);
+    stream.addEventListener("removetrack", handleTrackChange);
+
+    return () => {
+      stream.removeEventListener("addtrack", handleTrackChange);
+      stream.removeEventListener("removetrack", handleTrackChange);
+    };
+  }, [stream]);
+
+  const handleUnmuteAudio = (e) => {
+    if (e) e.stopPropagation();
+    const videoEl = videoElementRef.current;
+    if (videoEl) {
+      videoEl.muted = false;
+      videoEl
+        .play()
+        .then(() => {
+          setIsAudioMutedByPolicy(false);
+        })
+        .catch((e) => console.warn("[WebRTC] Unmute play failed:", e));
+    }
+  };
+
+  return (
+    <div
+      className="remote-peer-tile"
+      onClick={isAudioMutedByPolicy ? handleUnmuteAudio : undefined}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        minHeight: "220px",
+        background: "#0f172a",
+        borderRadius: "12px",
+        overflow: "hidden",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: "1px solid rgba(255, 255, 255, 0.15)",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+        cursor: isAudioMutedByPolicy ? "pointer" : "default",
+      }}
+    >
+      {/* Video element is permanently rendered in DOM to keep mobile video pipeline active */}
+      <video
+        ref={videoElementRef}
+        autoPlay
+        playsInline
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          zIndex: isVideoVisible ? 2 : 1,
+          opacity: isVideoVisible ? 1 : 0,
+        }}
+      />
+
+      {/* Placeholder / Connecting state overlay */}
+      {!isVideoVisible && (
+        <div
+          style={{
+            position: "relative",
+            zIndex: 3,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#ffffff",
+            padding: "16px",
+            textAlign: "center",
+          }}
+        >
+          <div
+            style={{
+              width: "56px",
+              height: "56px",
+              borderRadius: "50%",
+              background:
+                role === "doctor"
+                  ? "#087f8c"
+                  : role === "interpreter"
+                  ? "#6366f1"
+                  : "#0d9488",
+              color: "#ffffff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "18px",
+              fontWeight: "700",
+              marginBottom: "8px",
+            }}
+          >
+            {displayName.slice(0, 2).toUpperCase()}
+          </div>
+          <strong style={{ fontSize: "14px", color: "#f8fafc" }}>
+            {displayName}
+          </strong>
+          <span
+            style={{
+              fontSize: "11px",
+              color: "#94a3b8",
+              marginTop: "2px",
+            }}
+          >
+            {peer?.stream
+              ? "Camera Off (Audio Active)"
+              : `Waiting for ${roleLabel} to connect stream...`}
+          </span>
+        </div>
+      )}
+
+      {/* Header Tag */}
+      <div
+        style={{
+          position: "absolute",
+          top: "8px",
+          left: "8px",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          background: "rgba(15, 23, 42, 0.8)",
+          backdropFilter: "blur(6px)",
+          padding: "3px 8px",
+          borderRadius: "6px",
+          border: "1px solid rgba(255, 255, 255, 0.15)",
+          color: "#ffffff",
+          fontSize: "11px",
+          fontWeight: "600",
+          zIndex: 5,
+        }}
+      >
+        <span
+          style={{
+            width: "7px",
+            height: "7px",
+            borderRadius: "50%",
+            background: isVideoVisible ? "#10b981" : "#f59e0b",
+          }}
+        />
+        <span>{displayName}</span>
+        <span
+          style={{
+            fontSize: "10px",
+            background:
+              role === "doctor"
+                ? "rgba(8, 127, 140, 0.5)"
+                : role === "interpreter"
+                ? "rgba(99, 102, 241, 0.5)"
+                : "rgba(13, 148, 136, 0.5)",
+            color:
+              role === "doctor"
+                ? "#a5f3fc"
+                : role === "interpreter"
+                ? "#c7d2fe"
+                : "#99f6e4",
+            padding: "1px 5px",
+            borderRadius: "4px",
+          }}
+        >
+          {roleLabel}
+        </span>
+      </div>
+
+      {/* Mobile unmuted audio banner */}
+      {isAudioMutedByPolicy && (
+        <button
+          onClick={handleUnmuteAudio}
+          type="button"
+          style={{
+            position: "absolute",
+            bottom: "8px",
+            left: "8px",
+            background: "rgba(239, 68, 68, 0.9)",
+            color: "#ffffff",
+            border: "none",
+            borderRadius: "6px",
+            padding: "4px 8px",
+            fontSize: "11px",
+            fontWeight: "600",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            zIndex: 6,
+          }}
+        >
+          <Volume2 size={12} />
+          <span>Tap to Unmute</span>
+        </button>
+      )}
+
+      {/* Mic state */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: "8px",
+          right: "8px",
+          background: "rgba(15, 23, 42, 0.7)",
+          padding: "3px 6px",
+          borderRadius: "4px",
+          display: "flex",
+          alignItems: "center",
+          zIndex: 5,
+        }}
+      >
+        {isAudioActive ? (
+          <Mic size={12} style={{ color: "#4ade80" }} />
+        ) : (
+          <MicOff size={12} style={{ color: "#f87171" }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Inner Active Video Room Component to handle WebRTC lifecycle cleanly
  */
 function ActivePatientVideoRoom({
@@ -59,6 +340,7 @@ function ActivePatientVideoRoom({
     errorMessage,
     permissionDenied,
     localStream,
+    remotePeers,
     isMicOn,
     isCameraOn,
     remoteMediaState,
@@ -71,12 +353,27 @@ function ActivePatientVideoRoom({
     leaveConsultation,
     retryConnection,
   } = useWebRTC({
-    appointmentId: currentAppointment.id,
+    appointmentId: currentAppointment._id || currentAppointment.id,
     user,
     onConsultationEnded: () => {
       // Notification handled in state
     },
   });
+
+  const hasInterpreter =
+    currentAppointment.interpreterRequested ||
+    interpreterConnected ||
+    remotePeers.some((p) => p.role === "interpreter") ||
+    remotePeers.length > 1;
+
+  const doctorPeer =
+    remotePeers.find((p) => p.role === "doctor") ||
+    remotePeers.find((p) => p.role !== "interpreter") ||
+    null;
+
+  const interpreterPeer =
+    remotePeers.find((p) => p.role === "interpreter") ||
+    (remotePeers.length > 1 ? remotePeers.find((p) => p.role !== "doctor") : null);
 
   const handleSendMessage = (e) => {
     e.preventDefault();
@@ -91,9 +388,6 @@ function ActivePatientVideoRoom({
       onLeaveRoom();
     }
   };
-
-  const isRemoteVideoVisible =
-    connectionStatus === "CONNECTED" && remoteMediaState.isVideoEnabled;
 
   return (
     <div className="consultation-room-container">
@@ -226,79 +520,69 @@ function ActivePatientVideoRoom({
               <span>Encrypted HealTalk WebRTC Telemedicine Channel</span>
             </div>
 
-            {/* Remote Video Stream Element */}
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="remote-video-element"
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                position: "absolute",
-                top: 0,
-                left: 0,
-                display: isRemoteVideoVisible ? "block" : "none",
-                zIndex: 2,
-              }}
-            />
-
-            {/* Doctor Video State Placeholder when video stream is not active */}
-            {!isRemoteVideoVisible && (
+            {/* Video Tile Area: Multi-Peer Grid for Doctor + Interpreter, or Single Tile for Doctor */}
+            {hasInterpreter ? (
               <div
-                className="doctor-video-placeholder"
-                style={{ position: "relative", zIndex: 3 }}
+                className="multi-peer-grid"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  height: "100%",
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "10px",
+                  padding: "10px",
+                  boxSizing: "border-box",
+                  zIndex: 2,
+                }}
               >
-                <div className="doc-feed-avatar">
-                  <Stethoscope size={40} />
-                </div>
-                <span className="feed-name">{doctorName}</span>
-                <div className="feed-status-tag">
-                  <span
-                    className="red-dot"
-                    style={{
-                      background:
-                        connectionStatus === "CONNECTED"
-                          ? "#10b981"
-                          : connectionStatus === "CONNECTING"
-                          ? "#38bdf8"
-                          : "#f59e0b",
-                    }}
-                  ></span>
-                  <span>{statusMessage}</span>
-                </div>
-                <p
-                  style={{
-                    fontSize: "12px",
-                    color: "rgba(255, 255, 255, 0.65)",
-                    marginTop: "8px",
-                    maxWidth: "420px",
-                  }}
-                >
-                  {connectionStatus === "WAITING_FOR_PEER"
-                    ? "The doctor will appear here automatically as soon as they join this consultation slot."
-                    : connectionStatus === "CONNECTING"
-                    ? "Securing peer-to-peer WebRTC video handshake..."
-                    : connectionStatus === "CONNECTED" && !remoteMediaState.isVideoEnabled
-                    ? "Doctor has temporarily turned off their camera (Audio stream active)."
-                    : "Encrypted direct peer-to-peer telemedicine channel active."}
-                </p>
+                {/* Doctor Tile */}
+                <RemoteParticipantTile
+                  peer={doctorPeer}
+                  defaultLabel={doctorName}
+                  defaultRole="doctor"
+                />
 
-                {/* Subtitles Overlay */}
-                {translationActive && (
-                  <div className="live-subtitles-overlay" style={{ zIndex: 10 }}>
-                    <div className="subtitles-badge">
-                      <Sparkles size={13} />
-                      <span>Live Speech Channel ({targetLanguage})</span>
-                    </div>
-                    <p className="subtitles-text">
-                      {chatMessages.length > 0
-                        ? `"${chatMessages[chatMessages.length - 1].text}"`
-                        : `"Real-time consultation audio stream calibrated for ${targetLanguage}."`}
-                    </p>
-                  </div>
-                )}
+                {/* Interpreter Tile */}
+                <RemoteParticipantTile
+                  peer={interpreterPeer}
+                  defaultLabel={currentAppointment.interpreter?.name || "Medical Interpreter"}
+                  defaultRole="interpreter"
+                />
+              </div>
+            ) : (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  height: "100%",
+                  zIndex: 2,
+                }}
+              >
+                <RemoteParticipantTile
+                  peer={doctorPeer}
+                  defaultLabel={doctorName}
+                  defaultRole="doctor"
+                />
+              </div>
+            )}
+
+            {/* Subtitles Overlay */}
+            {translationActive && (
+              <div className="live-subtitles-overlay" style={{ zIndex: 10 }}>
+                <div className="subtitles-badge">
+                  <Sparkles size={13} />
+                  <span>Live Speech Channel ({targetLanguage})</span>
+                </div>
+                <p className="subtitles-text">
+                  {chatMessages.length > 0
+                    ? `"${chatMessages[chatMessages.length - 1].text}"`
+                    : `"Real-time consultation audio stream calibrated for ${targetLanguage}."`}
+                </p>
               </div>
             )}
 
@@ -728,9 +1012,9 @@ function ActivePatientVideoRoom({
 
                 <div className="clinical-info-card">
                   <label>
-                    Previous Consultations ({previousAppointments.length})
+                    Previous Consultations ({previousAppointments?.length || 0})
                   </label>
-                  {previousAppointments.length === 0 ? (
+                  {!previousAppointments || previousAppointments.length === 0 ? (
                     <p style={{ color: "#6b878c" }}>
                       No previous consultations on record
                     </p>

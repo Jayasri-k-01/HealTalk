@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Video,
   VideoOff,
@@ -47,6 +47,287 @@ const AVAILABLE_INTERPRETER_LANGUAGES = [
 ];
 
 /**
+ * Reusable Remote Participant Video Tile for multi-peer calls
+ */
+function RemoteParticipantTile({ peer, defaultLabel, defaultRole }) {
+  const videoElementRef = useRef(null);
+  const [isAudioMutedByPolicy, setIsAudioMutedByPolicy] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  const stream = peer?.stream;
+  const hasVideoTrack = !!(
+    stream &&
+    stream.getVideoTracks().length > 0 &&
+    stream.getVideoTracks().some((t) => t.enabled)
+  );
+  const isVideoVisible = hasVideoTrack && peer?.isVideoEnabled !== false;
+  const isAudioActive = peer?.isAudioEnabled !== false;
+  const role = peer?.role || defaultRole || "patient";
+  const displayName =
+    peer?.userName ||
+    (role === "interpreter" ? "Medical Interpreter" : defaultLabel || "Participant");
+  const roleLabel =
+    role === "doctor"
+      ? "Doctor"
+      : role === "interpreter"
+      ? "Certified Interpreter"
+      : "Patient";
+
+  useEffect(() => {
+    const videoEl = videoElementRef.current;
+    if (!videoEl || !stream) return;
+
+    if (videoEl.srcObject !== stream) {
+      videoEl.srcObject = stream;
+    }
+
+    const attemptPlay = () => {
+      videoEl
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+          setIsAudioMutedByPolicy(videoEl.muted);
+        })
+        .catch((err) => {
+          console.warn("[WebRTC] Autoplay unmuted video blocked on mobile, falling back to muted:", err);
+          // Fallback: Muted playback starts immediately on mobile browsers
+          videoEl.muted = true;
+          setIsAudioMutedByPolicy(true);
+          videoEl
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch((e) => console.warn("[WebRTC] Muted autoplay also failed:", e));
+        });
+    };
+
+    attemptPlay();
+
+    const handleTrackChange = () => {
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
+      }
+      attemptPlay();
+    };
+
+    stream.addEventListener("addtrack", handleTrackChange);
+    stream.addEventListener("removetrack", handleTrackChange);
+
+    return () => {
+      stream.removeEventListener("addtrack", handleTrackChange);
+      stream.removeEventListener("removetrack", handleTrackChange);
+    };
+  }, [stream]);
+
+  const handleUnmuteAudio = (e) => {
+    if (e) e.stopPropagation();
+    const videoEl = videoElementRef.current;
+    if (videoEl) {
+      videoEl.muted = false;
+      videoEl
+        .play()
+        .then(() => {
+          setIsAudioMutedByPolicy(false);
+        })
+        .catch((e) => console.warn("[WebRTC] Unmute play failed:", e));
+    }
+  };
+
+  return (
+    <div
+      className="remote-peer-tile"
+      onClick={isAudioMutedByPolicy ? handleUnmuteAudio : undefined}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        minHeight: "220px",
+        background: "#0f172a",
+        borderRadius: "12px",
+        overflow: "hidden",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: "1px solid rgba(255, 255, 255, 0.15)",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+        cursor: isAudioMutedByPolicy ? "pointer" : "default",
+      }}
+    >
+      {/* Video element is permanently rendered in DOM to keep mobile video pipeline active */}
+      <video
+        ref={videoElementRef}
+        autoPlay
+        playsInline
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          zIndex: isVideoVisible ? 2 : 1,
+          opacity: isVideoVisible ? 1 : 0,
+        }}
+      />
+
+      {/* Placeholder / Connecting state overlay */}
+      {!isVideoVisible && (
+        <div
+          style={{
+            position: "relative",
+            zIndex: 3,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#ffffff",
+            padding: "16px",
+            textAlign: "center",
+          }}
+        >
+          <div
+            style={{
+              width: "56px",
+              height: "56px",
+              borderRadius: "50%",
+              background:
+                role === "doctor"
+                  ? "#087f8c"
+                  : role === "interpreter"
+                  ? "#6366f1"
+                  : "#0d9488",
+              color: "#ffffff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "18px",
+              fontWeight: "700",
+              marginBottom: "8px",
+            }}
+          >
+            {displayName.slice(0, 2).toUpperCase()}
+          </div>
+          <strong style={{ fontSize: "14px", color: "#f8fafc" }}>
+            {displayName}
+          </strong>
+          <span
+            style={{
+              fontSize: "11px",
+              color: "#94a3b8",
+              marginTop: "2px",
+            }}
+          >
+            {peer?.stream
+              ? "Camera Off (Audio Active)"
+              : `Waiting for ${roleLabel} to connect stream...`}
+          </span>
+        </div>
+      )}
+
+      {/* Header Tag */}
+      <div
+        style={{
+          position: "absolute",
+          top: "8px",
+          left: "8px",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          background: "rgba(15, 23, 42, 0.8)",
+          backdropFilter: "blur(6px)",
+          padding: "3px 8px",
+          borderRadius: "6px",
+          border: "1px solid rgba(255, 255, 255, 0.15)",
+          color: "#ffffff",
+          fontSize: "11px",
+          fontWeight: "600",
+          zIndex: 5,
+        }}
+      >
+        <span
+          style={{
+            width: "7px",
+            height: "7px",
+            borderRadius: "50%",
+            background: isVideoVisible ? "#10b981" : "#f59e0b",
+          }}
+        />
+        <span>{displayName}</span>
+        <span
+          style={{
+            fontSize: "10px",
+            background:
+              role === "doctor"
+                ? "rgba(8, 127, 140, 0.5)"
+                : role === "interpreter"
+                ? "rgba(99, 102, 241, 0.5)"
+                : "rgba(13, 148, 136, 0.5)",
+            color:
+              role === "doctor"
+                ? "#a5f3fc"
+                : role === "interpreter"
+                ? "#c7d2fe"
+                : "#99f6e4",
+            padding: "1px 5px",
+            borderRadius: "4px",
+          }}
+        >
+          {roleLabel}
+        </span>
+      </div>
+
+      {/* Mobile unmuted audio banner */}
+      {isAudioMutedByPolicy && (
+        <button
+          onClick={handleUnmuteAudio}
+          type="button"
+          style={{
+            position: "absolute",
+            bottom: "8px",
+            left: "8px",
+            background: "rgba(239, 68, 68, 0.9)",
+            color: "#ffffff",
+            border: "none",
+            borderRadius: "6px",
+            padding: "4px 8px",
+            fontSize: "11px",
+            fontWeight: "600",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            zIndex: 6,
+          }}
+        >
+          <Volume2 size={12} />
+          <span>Tap to Unmute</span>
+        </button>
+      )}
+
+      {/* Mic state */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: "8px",
+          right: "8px",
+          background: "rgba(15, 23, 42, 0.7)",
+          padding: "3px 6px",
+          borderRadius: "4px",
+          display: "flex",
+          alignItems: "center",
+          zIndex: 5,
+        }}
+      >
+        {isAudioActive ? (
+          <Mic size={12} style={{ color: "#4ade80" }} />
+        ) : (
+          <MicOff size={12} style={{ color: "#f87171" }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Inner Active Video Consultation Room for Doctor with WebRTC
  */
 function ActiveDoctorRoom({
@@ -75,6 +356,7 @@ function ActiveDoctorRoom({
     errorMessage,
     permissionDenied,
     localStream,
+    remotePeers,
     isMicOn,
     isCameraOn,
     remoteMediaState,
@@ -87,12 +369,27 @@ function ActiveDoctorRoom({
     endConsultation,
     retryConnection,
   } = useWebRTC({
-    appointmentId: appointment._id,
+    appointmentId: appointment._id || appointment.id,
     user,
     onConsultationEnded: () => {
       showToast("Consultation ended.");
     },
   });
+
+  const hasInterpreter =
+    appointment.interpreterRequested ||
+    interpreterStatus === "Connected" ||
+    remotePeers.some((p) => p.role === "interpreter") ||
+    remotePeers.length > 1;
+
+  const patientPeer =
+    remotePeers.find((p) => p.role === "patient") ||
+    remotePeers.find((p) => p.role !== "interpreter") ||
+    null;
+
+  const interpreterPeer =
+    remotePeers.find((p) => p.role === "interpreter") ||
+    (remotePeers.length > 1 ? remotePeers.find((p) => p.role !== "patient") : null);
 
   const handleSendMessage = (e) => {
     e.preventDefault();
@@ -161,9 +458,6 @@ function ActiveDoctorRoom({
     : "Doctor";
   const isNonEnglish =
     patientLanguage && patientLanguage.toLowerCase() !== "english";
-
-  const isRemoteVideoVisible =
-    connectionStatus === "CONNECTED" && remoteMediaState.isVideoEnabled;
 
   return (
     <div className="doctor-consultations-tab">
@@ -331,40 +625,54 @@ function ActiveDoctorRoom({
                 </span>
               </div>
 
-              {/* Remote Video Stream Element */}
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                className="remote-video-element"
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  display: isRemoteVideoVisible ? "block" : "none",
-                  zIndex: 2,
-                }}
-              />
-
-              {/* Patient Visual Feed Placeholder when video is not visible */}
-              {!isRemoteVideoVisible && (
+              {/* Video Tile Area: Multi-Peer Grid for Patient + Interpreter, or Single Tile for Patient */}
+              {hasInterpreter ? (
                 <div
-                  className="video-avatar-center"
-                  style={{ position: "relative", zIndex: 3 }}
+                  className="multi-peer-grid"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    height: "100%",
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: "10px",
+                    padding: "10px",
+                    boxSizing: "border-box",
+                    zIndex: 2,
+                  }}
                 >
-                  <div className="patient-feed-avatar">
-                    {patientDisplayName.slice(0, 2).toUpperCase()}
-                  </div>
-                  <h4>{patientDisplayName}</h4>
-                  <div className="feed-status-line">
-                    <span className="audio-wave-bar"></span>
-                    <span className="audio-wave-bar h-lg"></span>
-                    <span className="audio-wave-bar"></span>
-                    <span>{statusMessage}</span>
-                  </div>
+                  {/* Patient Tile */}
+                  <RemoteParticipantTile
+                    peer={patientPeer}
+                    defaultLabel={patientDisplayName}
+                    defaultRole="patient"
+                  />
+
+                  {/* Interpreter Tile */}
+                  <RemoteParticipantTile
+                    peer={interpreterPeer}
+                    defaultLabel={appointment.interpreter?.name || "Medical Interpreter"}
+                    defaultRole="interpreter"
+                  />
+                </div>
+              ) : (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    height: "100%",
+                    zIndex: 2,
+                  }}
+                >
+                  <RemoteParticipantTile
+                    peer={patientPeer}
+                    defaultLabel={patientDisplayName}
+                    defaultRole="patient"
+                  />
                 </div>
               )}
 
@@ -879,6 +1187,7 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
   const [appointment, setAppointment] = useState(null);
   const [patient, setPatient] = useState(null);
   const [previousRecords, setPreviousRecords] = useState([]);
+  const [isJoined, setIsJoined] = useState(false);
   const [sessionTimer, setSessionTimer] = useState("00:00");
   const [sessionSeconds, setSessionSeconds] = useState(0);
 
@@ -891,19 +1200,24 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
 
   // Timer interval for active session duration
   useEffect(() => {
-    const timerInterval = setInterval(() => {
-      setSessionSeconds((prev) => {
-        const next = prev + 1;
-        const mins = Math.floor(next / 60);
-        const secs = next % 60;
-        setSessionTimer(
-          `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
-        );
-        return next;
-      });
-    }, 1000);
-    return () => clearInterval(timerInterval);
-  }, []);
+    let timerInterval = null;
+    if (isJoined) {
+      timerInterval = setInterval(() => {
+        setSessionSeconds((prev) => {
+          const next = prev + 1;
+          const mins = Math.floor(next / 60);
+          const secs = next % 60;
+          setSessionTimer(
+            `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+          );
+          return next;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (timerInterval) clearInterval(timerInterval);
+    };
+  }, [isJoined]);
 
   const showToast = (message) => {
     setActionToast(message);
@@ -916,15 +1230,16 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
       setLoading(true);
       let targetAptId = initialSession?._id || initialSession?.id;
 
-      // If no initialSession passed, find doctor's first active or upcoming appointment from MongoDB
+      // If no initialSession passed, check only for active IN PROGRESS sessions (DO NOT auto-load pending/upcoming)
       if (!targetAptId) {
         const aptsData = await fetchDoctorAppointments();
         if (aptsData && aptsData.appointments && aptsData.appointments.length > 0) {
-          const activeOrUpcoming =
-            aptsData.appointments.find(
-              (a) => a.status === "Confirmed" || a.status === "In Progress"
-            ) || aptsData.appointments[0];
-          targetAptId = activeOrUpcoming._id;
+          const inProgress = aptsData.appointments.find(
+            (a) => a.status === "In Progress"
+          );
+          if (inProgress) {
+            targetAptId = inProgress._id;
+          }
         }
       }
 
@@ -932,6 +1247,7 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
         setAppointment(null);
         setPatient(null);
         setPreviousRecords([]);
+        setIsJoined(false);
         setLoading(false);
         return;
       }
@@ -948,9 +1264,17 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
           apt.interpreterLanguage || apt.patient?.language || "Spanish";
         setInterpreterStatus(isInterpReq ? "Connected" : "None");
         setSelectedLanguage(interpLang);
+
+        // If explicit initialSession was passed with confirmed/in-progress status, start consultation
+        if (apt.status === "Confirmed" || apt.status === "In Progress") {
+          setIsJoined(true);
+        } else {
+          setIsJoined(false);
+        }
       } else {
         setAppointment(null);
         setPatient(null);
+        setIsJoined(false);
       }
     } catch (err) {
       console.error("Failed to load real consultation data from MongoDB:", err);
@@ -1024,9 +1348,8 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
             margin: "0 auto 24px",
           }}
         >
-          You currently do not have an active live consultation. Please navigate
-          to your Appointments tab and click <strong>Join</strong> on any scheduled
-          consultation slot.
+          You currently do not have an active live consultation. View your scheduled
+          appointments to accept pending requests or start a confirmed consultation.
         </p>
         <button
           type="button"
@@ -1037,6 +1360,164 @@ function DoctorConsultationsTab({ onNavigateTab, initialSession, user }) {
           <Calendar size={15} />
           <span>View Scheduled Appointments</span>
         </button>
+      </div>
+    );
+  }
+
+  // If appointment is Pending, show Pending Notice and Accept button (DO NOT start WebRTC)
+  if (appointment.status === "Pending") {
+    return (
+      <div
+        className="doctor-card"
+        style={{
+          maxWidth: "620px",
+          margin: "24px auto",
+          padding: "36px 30px",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            width: "56px",
+            height: "56px",
+            borderRadius: "50%",
+            background: "#fffbeb",
+            color: "#d97706",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            margin: "0 auto 16px auto",
+          }}
+        >
+          <Clock size={28} />
+        </div>
+        <h3
+          style={{
+            fontSize: "20px",
+            fontWeight: 700,
+            color: "#0f172a",
+            marginBottom: "8px",
+          }}
+        >
+          Appointment Request Pending
+        </h3>
+        <p
+          style={{
+            fontSize: "14px",
+            color: "#64748b",
+            lineHeight: 1.6,
+            marginBottom: "24px",
+          }}
+        >
+          The consultation request for <strong>{patient?.name || "Patient"}</strong> on{" "}
+          {appointment.date} at {appointment.time} is pending your confirmation.
+          You must accept the appointment before the consultation room can be started.
+        </p>
+        <div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+          <button
+            type="button"
+            className="doctor-btn-secondary"
+            onClick={() => onNavigateTab("appointments")}
+          >
+            Back to Appointments
+          </button>
+          <button
+            type="button"
+            className="doctor-btn-primary"
+            style={{ background: "#16a34a", borderColor: "#16a34a" }}
+            disabled={actionLoading}
+            onClick={async () => {
+              try {
+                setActionLoading(true);
+                await confirmAppointment(appointment._id);
+                setAppointment((prev) => ({ ...prev, status: "Confirmed" }));
+                setIsJoined(true);
+                showToast("Appointment accepted & confirmed. Entering live consultation room...");
+              } catch (err) {
+                showToast(err.message || "Failed to accept appointment");
+              } finally {
+                setActionLoading(false);
+              }
+            }}
+          >
+            {actionLoading ? (
+              <Loader2 size={14} className="doctor-spin-icon" />
+            ) : (
+              <CheckCircle2 size={15} />
+            )}
+            <span>Accept & Start Consulting</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // If Confirmed but doctor hasn't joined yet
+  if (!isJoined && appointment.status === "Confirmed") {
+    return (
+      <div
+        className="doctor-card"
+        style={{
+          maxWidth: "600px",
+          margin: "24px auto",
+          padding: "36px 30px",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            width: "56px",
+            height: "56px",
+            borderRadius: "50%",
+            background: "#ecfdf5",
+            color: "#16a34a",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            margin: "0 auto 16px auto",
+          }}
+        >
+          <CheckCircle2 size={28} />
+        </div>
+        <h3
+          style={{
+            fontSize: "20px",
+            fontWeight: 700,
+            color: "#0f172a",
+            marginBottom: "8px",
+          }}
+        >
+          Confirmed Consultation Ready
+        </h3>
+        <p
+          style={{
+            fontSize: "14px",
+            color: "#64748b",
+            lineHeight: 1.6,
+            marginBottom: "24px",
+          }}
+        >
+          Appointment with <strong>{patient?.name || "Patient"}</strong> on{" "}
+          {appointment.date} at {appointment.time} is confirmed. Click below to
+          open the secure WebRTC video room and begin consulting.
+        </p>
+        <div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+          <button
+            type="button"
+            className="doctor-btn-secondary"
+            onClick={() => onNavigateTab("appointments")}
+          >
+            Back to Appointments
+          </button>
+          <button
+            type="button"
+            className="doctor-btn-primary"
+            onClick={() => setIsJoined(true)}
+          >
+            <Video size={16} />
+            <span>Start Consulting</span>
+          </button>
+        </div>
       </div>
     );
   }

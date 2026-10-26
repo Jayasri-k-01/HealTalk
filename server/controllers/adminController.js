@@ -817,13 +817,16 @@ const getAdminInterpreterDetails = async (req, res) => {
       return res.status(404).json({ success: false, message: "Interpreter not found." });
     }
 
-    const languages = interpreter.language ? [interpreter.language] : ["English"];
+    const languages = Array.isArray(interpreter.languages) && interpreter.languages.length > 0
+      ? interpreter.languages
+      : (interpreter.language ? [interpreter.language] : ["English"]);
     const qualification = interpreter.qualification || interpreter.specialization || "";
 
     res.json({
       success: true,
       _id: interpreter._id,
       id: interpreter._id,
+      interpreterId: interpreter.interpreterId || `INT-${String(interpreter._id).slice(-6).toUpperCase()}`,
       name: interpreter.name,
       email: interpreter.email,
       phone: interpreter.phone || "",
@@ -831,7 +834,13 @@ const getAdminInterpreterDetails = async (req, res) => {
       language: interpreter.language || "English",
       qualification: qualification,
       certification: qualification,
+      certificationNumber: interpreter.certificationNumber || interpreter.licenseNumber || "",
       experience: interpreter.experience || "",
+      specialization: interpreter.specialization || "",
+      bio: interpreter.bio || "",
+      profilePhoto: interpreter.profilePhoto || interpreter.avatar || "",
+      certificationDocument: interpreter.certificationDocument || null,
+      availabilityStatus: interpreter.availabilityStatus || "Available",
       licenseNumber: interpreter.licenseNumber || "",
       status: interpreter.status,
       isVerified: interpreter.isVerified || interpreter.status === "approved",

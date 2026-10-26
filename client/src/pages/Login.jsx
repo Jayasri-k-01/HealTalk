@@ -117,6 +117,107 @@ function Login() {
             </div>
           )}
 
+          {/* Quick Demo Account Selector for Consultation Testing */}
+          <div
+            style={{
+              background: "#f0f7f8",
+              border: "1px solid #d5eaec",
+              borderRadius: "12px",
+              padding: "12px 14px",
+              marginBottom: "20px",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                fontSize: "11px",
+                fontWeight: "700",
+                color: "#087f8c",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                marginBottom: "8px",
+              }}
+            >
+              Quick Demo Accounts (Click to Fill)
+            </span>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setFormData({ email: "patient@healtalk.com", password: "Patient@123" });
+                  if (error) setError("");
+                }}
+                style={{
+                  background: formData.email === "patient@healtalk.com" ? "#087f8c" : "#ffffff",
+                  color: formData.email === "patient@healtalk.com" ? "#ffffff" : "#1e293b",
+                  border: "1px solid #d5eaec",
+                  borderRadius: "8px",
+                  padding: "6px 4px",
+                  fontSize: "11px",
+                  fontWeight: "600",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "4px",
+                }}
+              >
+                <User size={12} />
+                <span>Patient</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setFormData({ email: "doctor@healtalk.com", password: "Doctor@123" });
+                  if (error) setError("");
+                }}
+                style={{
+                  background: formData.email === "doctor@healtalk.com" ? "#087f8c" : "#ffffff",
+                  color: formData.email === "doctor@healtalk.com" ? "#ffffff" : "#1e293b",
+                  border: "1px solid #d5eaec",
+                  borderRadius: "8px",
+                  padding: "6px 4px",
+                  fontSize: "11px",
+                  fontWeight: "600",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "4px",
+                }}
+              >
+                <Stethoscope size={12} />
+                <span>Doctor</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setFormData({ email: "interpreter@healtalk.com", password: "Interpreter@123" });
+                  if (error) setError("");
+                }}
+                style={{
+                  background: formData.email === "interpreter@healtalk.com" ? "#087f8c" : "#ffffff",
+                  color: formData.email === "interpreter@healtalk.com" ? "#ffffff" : "#1e293b",
+                  border: "1px solid #d5eaec",
+                  borderRadius: "8px",
+                  padding: "6px 4px",
+                  fontSize: "11px",
+                  fontWeight: "600",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "4px",
+                }}
+              >
+                <Languages size={12} />
+                <span>Interpreter</span>
+              </button>
+            </div>
+          </div>
+
           <form onSubmit={handleSubmit} className="auth-form">
             <div className="form-group">
               <label htmlFor="email">Email Address</label>
@@ -129,6 +230,9 @@ function Login() {
                   placeholder="name@example.com"
                   value={formData.email}
                   onChange={handleChange}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck="false"
                   required
                   disabled={isSubmitting}
                 />
