@@ -11,7 +11,15 @@ const getBaseURL = () => {
     }
     return url;
   }
-  return "/api";
+  // When running locally in dev mode, use Vite proxy /api
+  if (
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+  ) {
+    return "/api";
+  }
+  // When running on production (e.g. Vercel), connect directly to the live Render backend
+  return "https://healtalk-pv6t.onrender.com/api";
 };
 
 const API = axios.create({
