@@ -420,8 +420,12 @@ export function useWebRTC({
       return;
     }
 
-    // Connect socket (defaults to current host or VITE_SOCKET_URL)
-    const socketUrl = import.meta.env.VITE_SOCKET_URL || undefined;
+    // Connect socket (defaults to VITE_SOCKET_URL, or derives from VITE_API_URL, or current host)
+    const socketUrl =
+      import.meta.env.VITE_SOCKET_URL ||
+      (import.meta.env.VITE_API_URL
+        ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, "")
+        : undefined);
     const socket = io(socketUrl, {
       path: "/socket.io",
       auth: { token },
