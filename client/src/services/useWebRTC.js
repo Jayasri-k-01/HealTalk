@@ -420,12 +420,14 @@ export function useWebRTC({
       return;
     }
 
-    // Connect socket (defaults to VITE_SOCKET_URL, or derives from VITE_API_URL, or current host)
+    // Connect socket (defaults to VITE_SOCKET_URL, or derives from VITE_API_URL, or fallback to production backend)
     const socketUrl =
       import.meta.env.VITE_SOCKET_URL ||
       (import.meta.env.VITE_API_URL
-        ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, "")
-        : undefined);
+        ? String(import.meta.env.VITE_API_URL).trim().replace(/\/api\/?$/, "").replace(/\/+$/, "")
+        : (typeof window !== "undefined" && window.location.hostname !== "localhost"
+            ? "https://healtalk-pv6t.onrender.com"
+            : undefined));
     const socket = io(socketUrl, {
       path: "/socket.io",
       auth: { token },

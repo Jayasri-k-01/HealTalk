@@ -1,11 +1,15 @@
 import axios from "axios";
 
 // Determine base API URL:
-// 1. If VITE_API_URL is configured (e.g. via .env for direct backend access), use it.
-// 2. Otherwise default to "/api" which Vite proxies to backend port 5002.
+// 1. If VITE_API_URL is configured, normalize it and ensure it points to /api.
+// 2. Otherwise default to "/api" (which Vercel / Vite proxies to backend).
 const getBaseURL = () => {
   if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL;
+    let url = String(import.meta.env.VITE_API_URL).trim().replace(/\/+$/, "");
+    if (!url.endsWith("/api")) {
+      url = `${url}/api`;
+    }
+    return url;
   }
   return "/api";
 };
